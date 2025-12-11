@@ -1,0 +1,401 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2024 OpenWrt.org
+# Multi-Proxy service script - Per-IP SOCKS5/HTTP proxy routing
+
+START=99
+STOP=10
+
+NAME="multi_proxy"
+REDSOCKS_CONF_DIR="/var/run/multi_proxy"
+LOG_FILE="/var/log/multi_proxy.log"
+
+# Global variables
+ENABLED="0"
+BASE_PORT="12300"
+RT_TABLE_BASE="100"
+FWMARK_BASE="100"
+PROXY_INDEX=0
+
+log_msg() {
+    local level="$1"
+    shift
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$level] $*" >> "$LOG_FILE"
+    logger -t "$NAME" -p "daemon.$level" "$*"
+}
+
+# Get configuration values
+load_config() {
+    config_load multi_proxy
+    config_get ENABLED config enabled "0"
+    config_get BASE_PORT config base_port "12300"
+    config_get RT_TABLE_BASE config rt_table_base "100"
+    config_get FWMARK_BASE config fwmark_base "100"
+}
+
+# Clean up all iptables rules and routing
+cleanup() {
+    log_msg "info" "Cleaning up iptables rules and routing tables..."
+
+    # Remove UDP blocking rules
+    local src_ip
+    for src_ip in $(iptables -L FORWARD -n | grep "udp" | grep "DROP" | awk '{print $4}' | sort -u); do
+        iptables -D FORWARD -s "$src_ip" -p udp -j DROP 2>/dev/null
+    done
+
+    # Remove iptables chains
+    iptables -t nat -D PREROUTING -j MULTI_PROXY_NAT 2>/dev/null
+    iptables -t nat -F MULTI_PROXY_NAT 2>/dev/null
+    iptables -t nat -X MULTI_PROXY_NAT 2>/dev/null
+
+    iptables -t mangle -D PREROUTING -j MULTI_PROXY_MARK 2>/dev/null
+    iptables -t mangle -F MULTI_PROXY_MARK 2>/dev/null
+    iptables -t mangle -X MULTI_PROXY_MARK 2>/dev/null
+
+    # Remove ip rules and routes
+    local i=0
+    local fwmark_base="${FWMARK_BASE:-100}"
+    local rt_table_base="${RT_TABLE_BASE:-100}"
+
+    while [ $i -lt 50 ]; do
+        local fwmark=$((fwmark_base + i))
+        local rt_table=$((rt_table_base + i))
+        ip rule del fwmark "$fwmark" table "$rt_table" 2>/dev/null
+        ip route flush table "$rt_table" 2>/dev/null
+        i=$((i + 1))
+    done
+
+    # Kill all redsocks2 instances started by us
+    if [ -d "$REDSOCKS_CONF_DIR" ]; then
+        for pidfile in "$REDSOCKS_CONF_DIR"/*.pid; do
+            [ -f "$pidfile" ] && {
+                kill $(cat "$pidfile") 2>/dev/null
+                rm -f "$pidfile"
+            }
+        done
+    fi
+
+    pkill -f "redsocks2.*$REDSOCKS_CONF_DIR" 2>/dev/null
+
+    rm -rf "$REDSOCKS_CONF_DIR"
+
+    log_msg "info" "Cleanup completed"
+}
+
+# Generate redsocks2 config for a proxy
+generate_redsocks_config() {
+    local section="$1"
+    local index="$2"
+
+    local enabled name type server port username password
+    config_get enabled "$section" enabled "0"
+    [ "$enabled" != "1" ] && return 1
+
+    config_get name "$section" name "$section"
+    config_get type "$section" type "socks5"
+    config_get server "$section" server ""
+    config_get port "$section" port ""
+    config_get username "$section" username ""
+    config_get password "$section" password ""
+
+    [ -z "$server" ] || [ -z "$port" ] && {
+        log_msg "warn" "Proxy $name: missing server or port"
+        return 1
+    }
+
+    local local_port=$((BASE_PORT + index))
+    local conf_file="$REDSOCKS_CONF_DIR/redsocks_${index}.conf"
+
+    # Determine redsocks2 type
+    local rs_type="socks5"
+    case "$type" in
+        socks5) rs_type="socks5" ;;
+        socks4) rs_type="socks4" ;;
+        http-connect) rs_type="http-connect" ;;
+        http-relay) rs_type="http-relay" ;;
+    esac
+
+    # Generate config file with bind/relay format
+    {
+        echo 'base {'
+        echo '    log_debug = on;'
+        echo '    log_info = on;'
+        echo '    log = "syslog:daemon";'
+        echo '    daemon = on;'
+        echo '    redirector = iptables;'
+        echo '}'
+        echo ''
+        echo 'redsocks {'
+        echo "    bind = \"127.0.0.1:${local_port}\";"
+        echo "    relay = \"${server}:${port}\";"
+        echo "    type = ${rs_type};"
+        echo '    autoproxy = 0;'
+        echo '    timeout = 10;'
+        if [ -n "$username" ] && [ -n "$password" ]; then
+            echo "    login = \"${username}\";"
+            echo "    password = \"${password}\";"
+        fi
+        echo '}'
+    } > "$conf_file"
+
+    log_msg "info" "Generated config for proxy $name (index $index, port $local_port, server $server:$port)"
+    cat "$conf_file" >> "$LOG_FILE"
+    return 0
+}
+
+# Setup iptables and routing for a proxy
+setup_routing() {
+    local section="$1"
+    local index="$2"
+
+    local enabled name server
+    config_get enabled "$section" enabled "0"
+    [ "$enabled" != "1" ] && return 1
+
+    config_get name "$section" name "$section"
+    config_get server "$section" server ""
+
+    local local_port=$((BASE_PORT + index))
+    local fwmark=$((FWMARK_BASE + index))
+    local rt_table=$((RT_TABLE_BASE + index))
+
+    # Get source IPs for this proxy
+    local source_ips=""
+
+    # Use callback to collect source IPs
+    append_ip() {
+        source_ips="$source_ips $1"
+    }
+    config_list_foreach "$section" source_ip append_ip
+
+    # Trim leading space
+    source_ips=$(echo "$source_ips" | sed 's/^ *//')
+
+    [ -z "$source_ips" ] && {
+        log_msg "warn" "Proxy $name: no source IPs configured"
+        return 1
+    }
+
+    log_msg "info" "Source IPs for $name: $source_ips"
+
+    # Get default gateway
+    local gateway=$(ip route | grep "^default" | awk '{print $3}' | head -1)
+    [ -z "$gateway" ] && {
+        log_msg "error" "Cannot determine default gateway"
+        return 1
+    }
+
+    # Setup routing table
+    ip route add default via "$gateway" table "$rt_table" 2>/dev/null
+    ip rule add fwmark "$fwmark" table "$rt_table" priority $((1000 + index)) 2>/dev/null
+
+    log_msg "info" "Created routing table $rt_table with fwmark $fwmark for proxy $name (gateway: $gateway)"
+
+    # Add iptables rules for each source IP
+    for src_ip in $source_ips; do
+        # Mark traffic from this source IP
+        iptables -t mangle -A MULTI_PROXY_MARK -s "$src_ip" -j MARK --set-mark "$fwmark"
+
+        # Block all UDP traffic to force TCP (so traffic goes through proxy)
+        iptables -I FORWARD -s "$src_ip" -p udp -j DROP
+
+        # For forwarded traffic (from LAN devices), use DNAT to redirect to redsocks
+        # Skip local/private destinations
+        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d 10.0.0.0/8 -j RETURN
+        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d 172.16.0.0/12 -j RETURN
+        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d 192.168.0.0/16 -j RETURN
+        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d 127.0.0.0/8 -j RETURN
+        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d 224.0.0.0/4 -j RETURN
+        # Skip traffic to the proxy server itself to prevent loops
+        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d "$server" -j RETURN
+
+        # Use DNAT for forwarded traffic (works for traffic passing through router)
+        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -j DNAT --to-destination 127.0.0.1:"$local_port"
+
+        log_msg "info" "Added rules for $src_ip -> proxy $name (fwmark $fwmark, DNAT to 127.0.0.1:$local_port, UDP blocked)"
+    done
+
+    return 0
+}
+
+# Start a redsocks2 instance
+start_redsocks_instance() {
+    local index="$1"
+    local conf_file="$REDSOCKS_CONF_DIR/redsocks_${index}.conf"
+    local pid_file="$REDSOCKS_CONF_DIR/redsocks_${index}.pid"
+
+    [ -f "$conf_file" ] || return 1
+
+    log_msg "info" "Starting redsocks2 with config: $conf_file"
+
+    # Start redsocks2
+    redsocks2 -c "$conf_file" -p "$pid_file" 2>&1 | while read line; do
+        log_msg "info" "redsocks2: $line"
+    done
+
+    sleep 1
+
+    if [ -f "$pid_file" ]; then
+        local pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            log_msg "info" "Started redsocks2 instance $index (pid: $pid)"
+            return 0
+        fi
+    fi
+
+    # Check if process is running by another method
+    if pgrep -f "redsocks2.*redsocks_${index}.conf" >/dev/null 2>&1; then
+        log_msg "info" "Started redsocks2 instance $index (found by pgrep)"
+        return 0
+    fi
+
+    log_msg "error" "Failed to start redsocks2 instance $index"
+    return 1
+}
+
+# Process a single proxy section
+process_proxy() {
+    local section="$1"
+
+    local enabled
+    config_get enabled "$section" enabled "0"
+    [ "$enabled" != "1" ] && return 0
+
+    log_msg "info" "Processing proxy section: $section (index: $PROXY_INDEX)"
+
+    if generate_redsocks_config "$section" "$PROXY_INDEX"; then
+        if setup_routing "$section" "$PROXY_INDEX"; then
+            if start_redsocks_instance "$PROXY_INDEX"; then
+                PROXY_INDEX=$((PROXY_INDEX + 1))
+                return 0
+            fi
+        fi
+    fi
+
+    log_msg "warn" "Failed to setup proxy $section"
+    return 1
+}
+
+start() {
+    load_config
+
+    if [ "$ENABLED" != "1" ]; then
+        log_msg "info" "Multi-proxy service is disabled"
+        echo "Multi-proxy service is disabled"
+        return 0
+    fi
+
+    log_msg "info" "Starting multi-proxy service..."
+    echo "Starting multi-proxy service..."
+
+    mkdir -p "$REDSOCKS_CONF_DIR"
+
+    cleanup
+
+    mkdir -p "$REDSOCKS_CONF_DIR"
+
+    # Enable route_localnet to allow DNAT to 127.0.0.1
+    for iface in /proc/sys/net/ipv4/conf/*/route_localnet; do
+        echo 1 > "$iface" 2>/dev/null
+    done
+    log_msg "info" "Enabled route_localnet for all interfaces"
+
+    # Create iptables chains
+    iptables -t mangle -N MULTI_PROXY_MARK 2>/dev/null
+    iptables -t mangle -A PREROUTING -j MULTI_PROXY_MARK
+
+    iptables -t nat -N MULTI_PROXY_NAT 2>/dev/null
+    iptables -t nat -A PREROUTING -j MULTI_PROXY_NAT
+
+    # Skip local addresses in mangle (these won't be marked)
+    iptables -t mangle -A MULTI_PROXY_MARK -d 10.0.0.0/8 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 172.16.0.0/12 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 192.168.0.0/16 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 127.0.0.0/8 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 224.0.0.0/4 -j RETURN
+
+    PROXY_INDEX=0
+
+    config_load multi_proxy
+    config_foreach process_proxy proxy
+
+    if [ $PROXY_INDEX -gt 0 ]; then
+        log_msg "info" "Multi-proxy service started with $PROXY_INDEX proxy(ies)"
+        echo "Multi-proxy service started with $PROXY_INDEX proxy(ies)"
+        touch "$REDSOCKS_CONF_DIR/running"
+    else
+        log_msg "warn" "No proxies configured or all proxies failed to start"
+        echo "Warning: No proxies configured or all proxies failed to start"
+        cleanup
+    fi
+}
+
+stop() {
+    log_msg "info" "Stopping multi-proxy service..."
+    echo "Stopping multi-proxy service..."
+
+    load_config
+    cleanup
+
+    log_msg "info" "Multi-proxy service stopped"
+    echo "Multi-proxy service stopped"
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
+
+reload() {
+    restart
+}
+
+status() {
+    load_config
+
+    echo "=== Multi-Proxy Status ==="
+    echo ""
+
+    if [ "$ENABLED" != "1" ]; then
+        echo "Service: DISABLED"
+        return
+    fi
+
+    echo "Service: ENABLED"
+
+    local running_instances=$(pgrep -c -f "redsocks2" 2>/dev/null || echo "0")
+    if [ "$running_instances" -gt 0 ]; then
+        echo "Status: RUNNING ($running_instances instance(s))"
+    else
+        echo "Status: STOPPED"
+    fi
+    echo ""
+
+    echo "--- Running redsocks2 instances ---"
+    ps w 2>/dev/null | grep "redsocks2" | grep -v grep || echo "No instances running"
+    echo ""
+
+    echo "--- iptables mangle rules ---"
+    iptables -t mangle -L MULTI_PROXY_MARK -n -v 2>/dev/null || echo "Chain not found"
+    echo ""
+
+    echo "--- iptables nat rules ---"
+    iptables -t nat -L MULTI_PROXY_NAT -n -v 2>/dev/null || echo "Chain not found"
+    echo ""
+
+    echo "--- IP rules ---"
+    ip rule show 2>/dev/null | grep -E "fwmark.*lookup" || echo "No fwmark rules"
+    echo ""
+
+    echo "--- Routing tables ---"
+    local i=0
+    while [ $i -lt 10 ]; do
+        local rt_table=$((RT_TABLE_BASE + i))
+        local routes=$(ip route show table "$rt_table" 2>/dev/null)
+        if [ -n "$routes" ]; then
+            echo "Table $rt_table:"
+            echo "$routes"
+        fi
+        i=$((i + 1))
+    done
+}

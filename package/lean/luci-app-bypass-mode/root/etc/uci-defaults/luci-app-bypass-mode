@@ -1,0 +1,41 @@
+#!/bin/sh
+# Copyright (C) 2024 OpenWrt.org
+# UCI defaults for luci-app-bypass-mode
+
+# Initialize configuration if not exists
+if [ ! -f /etc/config/bypass_mode ]; then
+    touch /etc/config/bypass_mode
+
+    uci -q batch <<-EOF
+        set bypass_mode.config=bypass_mode
+        set bypass_mode.config.enabled='0'
+        set bypass_mode.config.interface='eth0'
+        set bypass_mode.config.lan_ipaddr='192.168.1.2'
+        set bypass_mode.config.lan_netmask='255.255.255.0'
+        set bypass_mode.config.gateway='192.168.1.1'
+        set bypass_mode.config.dns='192.168.1.1'
+        set bypass_mode.config.disable_dhcp='1'
+        set bypass_mode.config.ipv6_mode='nat6'
+        set bypass_mode.config.ipv6_ula_prefix='fd00:ab:cd::/48'
+        set bypass_mode.config.ipv6_lan_addr='fd00:ab:cd::2/64'
+        set bypass_mode.config.ipv6_gateway=''
+        set bypass_mode.config.ipv6_masq='1'
+        set bypass_mode.config.ipv6_accept_ra='1'
+        set bypass_mode.config.dhcpv6_mode='disabled'
+        set bypass_mode.config.ra_mode='server'
+        set bypass_mode.config.firewall_enabled='1'
+        set bypass_mode.config.syn_flood='1'
+        set bypass_mode.config.fullcone_nat='1'
+        set bypass_mode.config.dns6=''
+
+        set bypass_mode.routing=routing
+        set bypass_mode.routing.enabled='1'
+        set bypass_mode.routing.dns_redirect='1'
+        set bypass_mode.routing.redirect_all='0'
+        set bypass_mode.routing.traffic_mode='all'
+
+        commit bypass_mode
+EOF
+fi
+
+exit 0

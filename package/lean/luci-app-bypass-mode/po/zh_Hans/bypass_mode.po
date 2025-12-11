@@ -1,0 +1,294 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Project-Id-Version: luci-app-bypass-mode\n"
+"POT-Creation-Date: 2024-01-01 00:00+0000\n"
+"Language: zh_Hans\n"
+
+msgid "Bypass Router Mode"
+msgstr "旁路由模式"
+
+msgid "Configure single NIC bypass router mode with IPv4 and IPv6 dual-stack support. This mode allows your device to act as a secondary router/gateway in an existing network."
+msgstr "配置单网口旁路由模式，支持 IPv4 和 IPv6 双栈。此模式允许您的设备在现有网络中充当辅助路由器/网关。"
+
+msgid "Service Status"
+msgstr "服务状态"
+
+msgid "Basic Settings"
+msgstr "基本设置"
+
+msgid "General"
+msgstr "常规"
+
+msgid "IPv4 Settings"
+msgstr "IPv4 设置"
+
+msgid "IPv6 Settings"
+msgstr "IPv6 设置"
+
+msgid "Firewall"
+msgstr "防火墙"
+
+msgid "Advanced"
+msgstr "高级"
+
+msgid "Enable Bypass Mode"
+msgstr "启用旁路由模式"
+
+msgid "Enable bypass router mode. This will modify your network configuration."
+msgstr "启用旁路由模式。这将修改您的网络配置。"
+
+msgid "Network Interface"
+msgstr "网络接口"
+
+msgid "Physical network interface to use (usually eth0 for single NIC)"
+msgstr "要使用的物理网络接口（单网口通常为 eth0）"
+
+msgid "LAN IP Address"
+msgstr "LAN IP 地址"
+
+msgid "IP address of this bypass router"
+msgstr "此旁路由的 IP 地址"
+
+msgid "LAN Netmask"
+msgstr "LAN 子网掩码"
+
+msgid "Subnet mask for LAN"
+msgstr "LAN 的子网掩码"
+
+msgid "Gateway"
+msgstr "网关"
+
+msgid "IP address of the main router (gateway)"
+msgstr "主路由（网关）的 IP 地址"
+
+msgid "DNS Servers"
+msgstr "DNS 服务器"
+
+msgid "DNS servers (space separated)"
+msgstr "DNS 服务器（空格分隔）"
+
+msgid "Disable DHCP Server"
+msgstr "禁用 DHCP 服务器"
+
+msgid "Disable DHCP server on this device (recommended for bypass mode)"
+msgstr "在此设备上禁用 DHCP 服务器（旁路由模式推荐）"
+
+msgid "IPv6 Mode"
+msgstr "IPv6 模式"
+
+msgid "Select IPv6 operation mode"
+msgstr "选择 IPv6 运行模式"
+
+msgid "Disabled - No IPv6"
+msgstr "禁用 - 无 IPv6"
+
+msgid "NAT6 - IPv6 Network Address Translation"
+msgstr "NAT6 - IPv6 网络地址转换"
+
+msgid "Relay - Passthrough IPv6 from main router"
+msgstr "中继 - 从主路由透传 IPv6"
+
+msgid "Hybrid - NAT6 + Relay"
+msgstr "混合 - NAT6 + 中继"
+
+msgid "IPv6 ULA Prefix"
+msgstr "IPv6 ULA 前缀"
+
+msgid "Unique Local Address prefix for NAT6 mode (e.g., fd00:ab:cd::/48)"
+msgstr "NAT6 模式的唯一本地地址前缀（例如：fd00:ab:cd::/48）"
+
+msgid "IPv6 LAN Address"
+msgstr "IPv6 LAN 地址"
+
+msgid "IPv6 address for LAN interface"
+msgstr "LAN 接口的 IPv6 地址"
+
+msgid "IPv6 Gateway"
+msgstr "IPv6 网关"
+
+msgid "IPv6 address of main router (required for relay mode)"
+msgstr "主路由的 IPv6 地址（中继模式需要）"
+
+msgid "Enable IPv6 NAT"
+msgstr "启用 IPv6 NAT"
+
+msgid "Enable IPv6 MASQUERADE (NAT6) for outgoing traffic"
+msgstr "为出站流量启用 IPv6 MASQUERADE (NAT6)"
+
+msgid "Accept RA"
+msgstr "接受 RA"
+
+msgid "Accept Router Advertisements from upstream"
+msgstr "从上游接受路由器通告"
+
+msgid "DHCPv6 Mode"
+msgstr "DHCPv6 模式"
+
+msgid "DHCPv6 server mode"
+msgstr "DHCPv6 服务器模式"
+
+msgid "Disabled"
+msgstr "禁用"
+
+msgid "Server - Provide IPv6 addresses"
+msgstr "服务器 - 提供 IPv6 地址"
+
+msgid "Relay - Forward to main router"
+msgstr "中继 - 转发到主路由"
+
+msgid "Hybrid"
+msgstr "混合"
+
+msgid "RA Mode"
+msgstr "RA 模式"
+
+msgid "Router Advertisement mode"
+msgstr "路由器通告模式"
+
+msgid "Server - Send RA to LAN"
+msgstr "服务器 - 向 LAN 发送 RA"
+
+msgid "Relay - Forward RA"
+msgstr "中继 - 转发 RA"
+
+msgid "IPv6 DNS Servers"
+msgstr "IPv6 DNS 服务器"
+
+msgid "IPv6 DNS servers (space separated). Leave empty to use IPv4 DNS"
+msgstr "IPv6 DNS 服务器（空格分隔）。留空则使用 IPv4 DNS"
+
+msgid "Enable Firewall"
+msgstr "启用防火墙"
+
+msgid "Enable firewall rules for bypass mode"
+msgstr "为旁路由模式启用防火墙规则"
+
+msgid "SYN Flood Protection"
+msgstr "SYN 洪水防护"
+
+msgid "Enable SYN flood attack protection"
+msgstr "启用 SYN 洪水攻击防护"
+
+msgid "Full Cone NAT"
+msgstr "全锥形 NAT"
+
+msgid "Enable full cone NAT for better P2P and gaming performance"
+msgstr "启用全锥形 NAT 以获得更好的 P2P 和游戏性能"
+
+msgid "Routing Settings"
+msgstr "路由设置"
+
+msgid "Advanced routing configuration for bypass mode"
+msgstr "旁路由模式的高级路由配置"
+
+msgid "Enable Custom Routing"
+msgstr "启用自定义路由"
+
+msgid "Enable custom routing rules"
+msgstr "启用自定义路由规则"
+
+msgid "DNS Redirect"
+msgstr "DNS 重定向"
+
+msgid "Redirect all DNS queries to this device"
+msgstr "将所有 DNS 查询重定向到此设备"
+
+msgid "Redirect All Traffic"
+msgstr "重定向所有流量"
+
+msgid "Force all traffic through this bypass router"
+msgstr "强制所有流量通过此旁路由"
+
+msgid "Traffic Mode"
+msgstr "流量模式"
+
+msgid "Which traffic should be handled by bypass router"
+msgstr "哪些流量应由旁路由处理"
+
+msgid "All Traffic"
+msgstr "所有流量"
+
+msgid "Marked Traffic Only"
+msgstr "仅标记流量"
+
+msgid "None (Manual)"
+msgstr "无（手动）"
+
+msgid "Quick Setup"
+msgstr "快速设置"
+
+msgid "Use these presets for common bypass router scenarios"
+msgstr "使用这些预设来快速配置常见的旁路由场景"
+
+msgid "Apply NAT6 Preset"
+msgstr "应用 NAT6 预设"
+
+msgid "NAT6 Mode (Recommended)"
+msgstr "NAT6 模式（推荐）"
+
+msgid "Apply Relay Preset"
+msgstr "应用中继预设"
+
+msgid "Relay Mode (Pass-through)"
+msgstr "中继模式（透传）"
+
+msgid "Apply IPv4 Only Preset"
+msgstr "应用仅 IPv4 预设"
+
+msgid "IPv4 Only Mode"
+msgstr "仅 IPv4 模式"
+
+msgid "Enabled"
+msgstr "已启用"
+
+msgid "Bypass Mode"
+msgstr "旁路由模式"
+
+msgid "LAN IPv4 Address"
+msgstr "LAN IPv4 地址"
+
+msgid "LAN IPv6 Address"
+msgstr "LAN IPv6 地址"
+
+msgid "IPv4 Gateway"
+msgstr "IPv4 网关"
+
+msgid "IPv6 Forwarding"
+msgstr "IPv6 转发"
+
+msgid "NAT6 Status"
+msgstr "NAT6 状态"
+
+msgid "Active"
+msgstr "活动"
+
+msgid "Inactive"
+msgstr "未激活"
+
+msgid "rules"
+msgstr "条规则"
+
+msgid "IPv4 Connectivity"
+msgstr "IPv4 连通性"
+
+msgid "IPv6 Connectivity"
+msgstr "IPv6 连通性"
+
+msgid "Connected"
+msgstr "已连接"
+
+msgid "Disconnected"
+msgstr "未连接"
+
+msgid "Apply Configuration"
+msgstr "应用配置"
+
+msgid "Restore Default"
+msgstr "恢复默认"
+
+msgid "Refresh Status"
+msgstr "刷新状态"
+
+msgid "Are you sure you want to restore default network configuration? This will disable bypass mode."
+msgstr "您确定要恢复默认网络配置吗？这将禁用旁路由模式。"

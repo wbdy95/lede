@@ -1,0 +1,249 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2024 OpenWrt.org
+# Bypass Router Mode Init Script
+
+START=99
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/sbin/bypass-mode
+
+. /lib/functions.sh
+. /lib/functions/network.sh
+
+log() {
+	logger -t "bypass-mode" "$1"
+}
+
+validate_section() {
+	uci_load_validate bypass_mode bypass_mode "$1" "$2" \
+		'enabled:bool:0' \
+		'interface:string:eth0' \
+		'lan_ipaddr:ip4addr:192.168.1.2' \
+		'lan_netmask:ip4addr:255.255.255.0' \
+		'gateway:ip4addr:192.168.1.1' \
+		'dns:string:192.168.1.1' \
+		'disable_dhcp:bool:1' \
+		'ipv6_mode:string:nat6' \
+		'ipv6_ula_prefix:string:fd00:ab:cd::/48' \
+		'ipv6_lan_addr:string:fd00:ab:cd::2/64' \
+		'ipv6_gateway:string' \
+		'ipv6_masq:bool:1' \
+		'ipv6_accept_ra:bool:1' \
+		'dhcpv6_mode:string:disabled' \
+		'ra_mode:string:server' \
+		'firewall_enabled:bool:1' \
+		'syn_flood:bool:1' \
+		'fullcone_nat:bool:1' \
+		'dns6:string'
+}
+
+apply_network_config() {
+	[ "$2" = 0 ] || {
+		log "Validation failed"
+		return 1
+	}
+
+	[ "$enabled" = "0" ] && {
+		log "Bypass mode is disabled"
+		return 0
+	}
+
+	log "Applying bypass router mode configuration..."
+
+	# Backup original configs
+	[ ! -f /etc/config/network.bypass_backup ] && cp /etc/config/network /etc/config/network.bypass_backup
+	[ ! -f /etc/config/dhcp.bypass_backup ] && cp /etc/config/dhcp /etc/config/dhcp.bypass_backup
+	[ ! -f /etc/config/firewall.bypass_backup ] && cp /etc/config/firewall /etc/config/firewall.bypass_backup
+
+	# Configure network - LAN interface
+	uci set network.lan.proto='static'
+	uci set network.lan.ipaddr="$lan_ipaddr"
+	uci set network.lan.netmask="$lan_netmask"
+	uci set network.lan.gateway="$gateway"
+	uci -q delete network.lan.dns
+	for d in $dns; do
+		uci add_list network.lan.dns="$d"
+	done
+
+	# Remove WAN interface for single NIC bypass mode
+	uci -q delete network.wan
+	uci -q delete network.wan6
+
+	# IPv6 configuration based on mode
+	case "$ipv6_mode" in
+		nat6)
+			log "Configuring IPv6 NAT6 mode..."
+			uci set network.lan.ip6addr="$ipv6_lan_addr"
+			uci set network.lan.ip6gw="$ipv6_gateway"
+			uci -q delete network.lan.ip6assign
+
+			# Enable IPv6 on LAN
+			uci set network.lan.delegate='0'
+
+			# Configure DHCPv6 for NAT6
+			uci set dhcp.lan.dhcpv6='server'
+			uci set dhcp.lan.ra='server'
+			uci set dhcp.lan.ra_management='1'
+			uci set dhcp.lan.ra_default='1'
+			;;
+		relay)
+			log "Configuring IPv6 relay mode..."
+			uci -q delete network.lan.ip6addr
+			uci set network.lan.ip6assign='64'
+			uci set network.lan.delegate='0'
+
+			# Configure DHCPv6 relay
+			uci set dhcp.lan.dhcpv6='relay'
+			uci set dhcp.lan.ra='relay'
+			uci set dhcp.lan.ndp='relay'
+			;;
+		hybrid)
+			log "Configuring IPv6 hybrid mode..."
+			uci set network.lan.ip6addr="$ipv6_lan_addr"
+			uci set network.lan.ip6assign='64'
+			uci set network.lan.delegate='0'
+
+			uci set dhcp.lan.dhcpv6='hybrid'
+			uci set dhcp.lan.ra='hybrid'
+			uci set dhcp.lan.ndp='hybrid'
+			;;
+		disabled)
+			log "IPv6 disabled"
+			uci -q delete network.lan.ip6addr
+			uci -q delete network.lan.ip6gw
+			uci -q delete network.lan.ip6assign
+			uci set dhcp.lan.dhcpv6='disabled'
+			uci set dhcp.lan.ra='disabled'
+			;;
+	esac
+
+	# DHCP configuration
+	if [ "$disable_dhcp" = "1" ]; then
+		uci set dhcp.lan.ignore='1'
+		log "DHCP server disabled"
+	else
+		uci set dhcp.lan.ignore='0'
+	fi
+
+	# Firewall configuration
+	if [ "$firewall_enabled" = "1" ]; then
+		# Set LAN zone to accept forward
+		uci set firewall.@zone[0].input='ACCEPT'
+		uci set firewall.@zone[0].output='ACCEPT'
+		uci set firewall.@zone[0].forward='ACCEPT'
+
+		# Remove WAN zone if exists
+		local wan_zone_idx=$(uci show firewall | grep "firewall.@zone\[.\].name='wan'" | sed "s/.*\[\([0-9]*\)\].*/\1/" | head -1)
+		[ -n "$wan_zone_idx" ] && uci -q delete firewall.@zone[$wan_zone_idx]
+
+		# SYN flood protection
+		uci set firewall.@defaults[0].syn_flood="$syn_flood"
+
+		# Fullcone NAT
+		if [ "$fullcone_nat" = "1" ]; then
+			uci set firewall.@defaults[0].fullcone='1'
+		fi
+	fi
+
+	# Commit changes
+	uci commit network
+	uci commit dhcp
+	uci commit firewall
+
+	log "Configuration applied successfully"
+}
+
+apply_ipv6_nat() {
+	local ipv6_mode=$(uci -q get bypass_mode.config.ipv6_mode)
+	local ipv6_masq=$(uci -q get bypass_mode.config.ipv6_masq)
+
+	[ "$ipv6_mode" = "nat6" ] && [ "$ipv6_masq" = "1" ] && {
+		log "Setting up IPv6 NAT (MASQUERADE)..."
+
+		# Flush existing NAT6 rules
+		ip6tables -t nat -F POSTROUTING 2>/dev/null
+
+		# Add MASQUERADE rule for IPv6
+		ip6tables -t nat -A POSTROUTING -o br-lan -j MASQUERADE
+
+		# Enable IPv6 forwarding
+		echo 1 > /proc/sys/net/ipv6/conf/all/forwarding
+
+		log "IPv6 NAT configured"
+	}
+}
+
+apply_routing() {
+	local dns_redirect=$(uci -q get bypass_mode.routing.dns_redirect)
+	local traffic_mode=$(uci -q get bypass_mode.routing.traffic_mode)
+	local enabled=$(uci -q get bypass_mode.routing.enabled)
+
+	[ "$enabled" != "1" ] && return
+
+	# DNS redirect
+	if [ "$dns_redirect" = "1" ]; then
+		log "Setting up DNS redirect..."
+
+		# Redirect DNS to local
+		iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53
+		iptables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 53
+
+		# IPv6 DNS redirect
+		ip6tables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null
+		ip6tables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null
+	fi
+}
+
+start_service() {
+	config_load bypass_mode
+	validate_section config apply_network_config
+
+	# Restart network
+	/etc/init.d/network restart
+
+	sleep 3
+
+	# Apply IPv6 NAT rules
+	apply_ipv6_nat
+
+	# Apply routing rules
+	apply_routing
+
+	log "Bypass router mode started"
+}
+
+stop_service() {
+	log "Stopping bypass router mode..."
+
+	# Restore original configs if backups exist
+	[ -f /etc/config/network.bypass_backup ] && {
+		cp /etc/config/network.bypass_backup /etc/config/network
+		log "Network config restored"
+	}
+	[ -f /etc/config/dhcp.bypass_backup ] && {
+		cp /etc/config/dhcp.bypass_backup /etc/config/dhcp
+		log "DHCP config restored"
+	}
+	[ -f /etc/config/firewall.bypass_backup ] && {
+		cp /etc/config/firewall.bypass_backup /etc/config/firewall
+		log "Firewall config restored"
+	}
+
+	# Clear IPv6 NAT rules
+	ip6tables -t nat -F POSTROUTING 2>/dev/null
+
+	# Restart network
+	/etc/init.d/network restart
+
+	log "Bypass router mode stopped"
+}
+
+reload_service() {
+	stop_service
+	start_service
+}
+
+service_triggers() {
+	procd_add_reload_trigger "bypass_mode"
+}

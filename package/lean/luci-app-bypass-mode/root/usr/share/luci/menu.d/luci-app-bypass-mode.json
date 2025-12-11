@@ -1,0 +1,15 @@
+{
+	"admin/network/bypass_mode": {
+		"title": "Bypass Router Mode",
+		"order": 95,
+		"action": {
+			"type": "cbi",
+			"path": "bypass_mode/settings",
+			"post": { "cbi.submit": true }
+		},
+		"depends": {
+			"acl": [ "luci-app-bypass-mode" ],
+			"uci": { "bypass_mode": true }
+		}
+	}
+}

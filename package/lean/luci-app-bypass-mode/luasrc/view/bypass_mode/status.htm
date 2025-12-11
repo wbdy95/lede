@@ -1,0 +1,195 @@
+<%#
+Copyright 2024 OpenWrt.org
+Licensed to the public under the Apache License 2.0.
+-%>
+
+<%
+local sys = require "luci.sys"
+local uci = require "luci.model.uci".cursor()
+
+local enabled = uci:get("bypass_mode", "config", "enabled") == "1"
+local ipv6_mode = uci:get("bypass_mode", "config", "ipv6_mode") or "disabled"
+
+-- Get current network status
+local lan_ip = sys.exec("ip -4 addr show br-lan 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -1"):gsub("%s+", "")
+local lan_ip6 = sys.exec("ip -6 addr show br-lan scope global 2>/dev/null | grep 'inet6 ' | awk '{print $2}' | head -1"):gsub("%s+", "")
+local gateway = sys.exec("ip route | grep default | awk '{print $3}' | head -1"):gsub("%s+", "")
+local gateway6 = sys.exec("ip -6 route | grep default | awk '{print $3}' | head -1"):gsub("%s+", "")
+
+-- Check IPv6 forwarding
+local ipv6_forward = sys.exec("cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null"):gsub("%s+", "") == "1"
+
+-- Check NAT6 status
+local nat6_count = tonumber(sys.exec("ip6tables -t nat -L POSTROUTING -n 2>/dev/null | grep -c MASQUERADE"):gsub("%s+", "")) or 0
+local nat6_active = nat6_count > 0
+
+-- Connectivity test
+local ipv4_conn = sys.call("ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1") == 0
+local ipv6_conn = sys.call("ping6 -c 1 -W 2 2400:3200::1 >/dev/null 2>&1") == 0
+-%>
+
+<style>
+.bypass-status {
+    margin-bottom: 20px;
+}
+.bypass-status .table {
+    width: 100%;
+}
+.bypass-status .tr {
+    display: flex;
+    padding: 8px 0;
+    border-bottom: 1px solid #eee;
+}
+.bypass-status .td {
+    flex: 1;
+}
+.bypass-status .td:first-child {
+    font-weight: bold;
+    max-width: 200px;
+}
+.status-enabled {
+    color: #5cb85c;
+    font-weight: bold;
+}
+.status-disabled {
+    color: #d9534f;
+    font-weight: bold;
+}
+.status-warning {
+    color: #f0ad4e;
+    font-weight: bold;
+}
+.conn-ok {
+    color: #5cb85c;
+}
+.conn-fail {
+    color: #d9534f;
+}
+.bypass-actions {
+    margin-top: 15px;
+}
+.bypass-actions input {
+    margin-right: 10px;
+}
+.ipv6-mode-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: bold;
+}
+.mode-nat6 { background-color: #5bc0de; color: white; }
+.mode-relay { background-color: #5cb85c; color: white; }
+.mode-hybrid { background-color: #f0ad4e; color: white; }
+.mode-disabled { background-color: #d9534f; color: white; }
+</style>
+
+<div class="bypass-status">
+    <h3><%:Service Status%></h3>
+    <div class="table">
+        <div class="tr">
+            <div class="td"><%:Bypass Mode%></div>
+            <div class="td">
+                <% if enabled then %>
+                    <span class="status-enabled"><%:Enabled%></span>
+                <% else %>
+                    <span class="status-disabled"><%:Disabled%></span>
+                <% end %>
+            </div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:LAN IPv4 Address%></div>
+            <div class="td"><%=pcdata(lan_ip ~= "" and lan_ip or "N/A")%></div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:LAN IPv6 Address%></div>
+            <div class="td"><%=pcdata(lan_ip6 ~= "" and lan_ip6 or "N/A")%></div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:IPv4 Gateway%></div>
+            <div class="td"><%=pcdata(gateway ~= "" and gateway or "N/A")%></div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:IPv6 Gateway%></div>
+            <div class="td"><%=pcdata(gateway6 ~= "" and gateway6 or "N/A")%></div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:IPv6 Mode%></div>
+            <div class="td">
+                <% if ipv6_mode == "nat6" then %>
+                    <span class="ipv6-mode-badge mode-nat6">NAT6</span>
+                <% elseif ipv6_mode == "relay" then %>
+                    <span class="ipv6-mode-badge mode-relay">Relay</span>
+                <% elseif ipv6_mode == "hybrid" then %>
+                    <span class="ipv6-mode-badge mode-hybrid">Hybrid</span>
+                <% else %>
+                    <span class="ipv6-mode-badge mode-disabled"><%:Disabled%></span>
+                <% end %>
+            </div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:IPv6 Forwarding%></div>
+            <div class="td">
+                <% if ipv6_forward then %>
+                    <span class="status-enabled"><%:Enabled%></span>
+                <% else %>
+                    <span class="status-disabled"><%:Disabled%></span>
+                <% end %>
+            </div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:NAT6 Status%></div>
+            <div class="td">
+                <% if nat6_active then %>
+                    <span class="status-enabled"><%:Active%></span> (<%=nat6_count%> <%:rules%>)
+                <% else %>
+                    <span class="status-disabled"><%:Inactive%></span>
+                <% end %>
+            </div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:IPv4 Connectivity%></div>
+            <div class="td">
+                <% if ipv4_conn then %>
+                    <span class="conn-ok">✓ <%:Connected%></span>
+                <% else %>
+                    <span class="conn-fail">✗ <%:Disconnected%></span>
+                <% end %>
+            </div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:IPv6 Connectivity%></div>
+            <div class="td">
+                <% if ipv6_conn then %>
+                    <span class="conn-ok">✓ <%:Connected%></span>
+                <% else %>
+                    <span class="conn-fail">✗ <%:Disconnected%></span>
+                <% end %>
+            </div>
+        </div>
+    </div>
+
+    <div class="bypass-actions">
+        <input type="button" class="btn cbi-button cbi-button-apply" value="<%:Apply Configuration%>" onclick="bypass_action('apply')" />
+        <input type="button" class="btn cbi-button cbi-button-reset" value="<%:Restore Default%>" onclick="bypass_action('restore')" />
+        <input type="button" class="btn cbi-button" value="<%:Refresh Status%>" onclick="location.reload()" />
+    </div>
+</div>
+
+<script type="text/javascript">
+function bypass_action(action) {
+    if (action === 'restore') {
+        if (!confirm('<%:Are you sure you want to restore default network configuration? This will disable bypass mode.%>')) {
+            return;
+        }
+    }
+    var url = '<%=luci.dispatcher.build_url("admin/network/bypass_mode")%>/' + action;
+    (new XHR()).get(url, null, function(x, data) {
+        if (x && x.status == 200) {
+            setTimeout(function() {
+                window.location.reload();
+            }, 3000);
+        }
+    });
+}
+</script>

@@ -1,0 +1,73 @@
+# Bypass Router Mode Configuration
+# Single NIC dual-stack (IPv4 + IPv6) support
+
+config bypass_mode 'config'
+	# Enable bypass router mode
+	option enabled '0'
+
+	# Network interface (usually eth0 for single NIC)
+	option interface 'eth0'
+
+	# LAN IP address (bypass router's IP)
+	option lan_ipaddr '192.168.1.2'
+
+	# LAN netmask
+	option lan_netmask '255.255.255.0'
+
+	# Main router (gateway) IP address
+	option gateway '192.168.1.1'
+
+	# DNS servers (space separated)
+	option dns '192.168.1.1'
+
+	# Disable DHCP server on LAN
+	option disable_dhcp '1'
+
+	# IPv6 mode: disabled, nat6, relay, hybrid
+	option ipv6_mode 'nat6'
+
+	# IPv6 ULA prefix for NAT6 mode
+	option ipv6_ula_prefix 'fd00:ab:cd::/48'
+
+	# IPv6 LAN address (for NAT6 mode)
+	option ipv6_lan_addr 'fd00:ab:cd::2/64'
+
+	# IPv6 gateway (main router's IPv6, for relay mode)
+	option ipv6_gateway ''
+
+	# Enable IPv6 masquerading (NAT6)
+	option ipv6_masq '1'
+
+	# Accept RA (Router Advertisement) from upstream
+	option ipv6_accept_ra '1'
+
+	# DHCPv6 mode: disabled, server, relay, hybrid
+	option dhcpv6_mode 'disabled'
+
+	# RA mode: disabled, server, relay, hybrid
+	option ra_mode 'server'
+
+	# Firewall settings
+	option firewall_enabled '1'
+
+	# Enable SYN flood protection
+	option syn_flood '1'
+
+	# Enable fullcone NAT
+	option fullcone_nat '1'
+
+	# Custom DNS for IPv6
+	option dns6 ''
+
+config routing 'routing'
+	# Enable custom routing
+	option enabled '1'
+
+	# Hijack DNS traffic to bypass router
+	option dns_redirect '1'
+
+	# Redirect all traffic through bypass router
+	option redirect_all '0'
+
+	# Bypass router handles which traffic: all, marked, none
+	option traffic_mode 'all'

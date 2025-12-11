@@ -1,0 +1,183 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Project-Id-Version: luci-app-multi-proxy\n"
+"POT-Creation-Date: 2024-01-01 00:00+0000\n"
+"Language: zh_Hans\n"
+
+msgid "Multi-Proxy"
+msgstr "多代理管理"
+
+msgid "Multi-Proxy Settings"
+msgstr "多代理设置"
+
+msgid "Configure per-IP SOCKS5/HTTP proxy routing. Each internal IP can use a different upstream proxy."
+msgstr "配置按IP分配的 SOCKS5/HTTP 代理路由。每个内网IP可以使用不同的上游代理。"
+
+msgid "Settings"
+msgstr "设置"
+
+msgid "Proxy List"
+msgstr "代理列表"
+
+msgid "Status"
+msgstr "状态"
+
+msgid "General Settings"
+msgstr "常规设置"
+
+msgid "Enable Multi-Proxy"
+msgstr "启用多代理"
+
+msgid "Base Local Port"
+msgstr "本地基础端口"
+
+msgid "Base port for redsocks2 instances. Each proxy uses base_port + index."
+msgstr "redsocks2 实例的基础端口。每个代理使用 base_port + 索引。"
+
+msgid "Routing Table Base"
+msgstr "路由表基数"
+
+msgid "Base routing table number for policy routing."
+msgstr "策略路由的基础路由表编号。"
+
+msgid "Firewall Mark Base"
+msgstr "防火墙标记基数"
+
+msgid "Base firewall mark for traffic marking."
+msgstr "流量标记的基础防火墙标记值。"
+
+msgid "Log Level"
+msgstr "日志级别"
+
+msgid "Emergency"
+msgstr "紧急"
+
+msgid "Alert"
+msgstr "警报"
+
+msgid "Critical"
+msgstr "严重"
+
+msgid "Error"
+msgstr "错误"
+
+msgid "Warning"
+msgstr "警告"
+
+msgid "Notice"
+msgstr "通知"
+
+msgid "Info"
+msgstr "信息"
+
+msgid "Debug"
+msgstr "调试"
+
+msgid "Proxy Servers"
+msgstr "代理服务器"
+
+msgid "Enable"
+msgstr "启用"
+
+msgid "Name"
+msgstr "名称"
+
+msgid "Type"
+msgstr "类型"
+
+msgid "Server"
+msgstr "服务器"
+
+msgid "Port"
+msgstr "端口"
+
+msgid "Username"
+msgstr "用户名"
+
+msgid "Password"
+msgstr "密码"
+
+msgid "Optional"
+msgstr "可选"
+
+msgid "Source IPs"
+msgstr "源IP地址"
+
+msgid "Internal IP addresses to route through this proxy"
+msgstr "通过此代理路由的内网IP地址"
+
+msgid "Quick Setup"
+msgstr "快速设置"
+
+msgid "Usage Instructions"
+msgstr "使用说明"
+
+msgid "Add proxy servers with their SOCKS5/HTTP connection details"
+msgstr "添加代理服务器及其 SOCKS5/HTTP 连接详情"
+
+msgid "Assign internal IPs to each proxy in the 'Source IPs' field"
+msgstr "在"源IP地址"字段中为每个代理分配内网IP"
+
+msgid "Save and apply, then restart the service"
+msgstr "保存并应用，然后重启服务"
+
+msgid "Traffic from assigned IPs will automatically route through the corresponding proxy"
+msgstr "分配IP的流量将自动通过对应的代理路由"
+
+msgid "Example"
+msgstr "示例"
+
+msgid "Service Status"
+msgstr "服务状态"
+
+msgid "Multi-Proxy Service"
+msgstr "多代理服务"
+
+msgid "Enabled"
+msgstr "已启用"
+
+msgid "Disabled"
+msgstr "已禁用"
+
+msgid "Running Status"
+msgstr "运行状态"
+
+msgid "Running"
+msgstr "运行中"
+
+msgid "Stopped"
+msgstr "已停止"
+
+msgid "instances"
+msgstr "个实例"
+
+msgid "NAT Rules"
+msgstr "NAT 规则"
+
+msgid "Mangle Rules"
+msgstr "Mangle 规则"
+
+msgid "rules"
+msgstr "条规则"
+
+msgid "Restart Service"
+msgstr "重启服务"
+
+msgid "Refresh Status"
+msgstr "刷新状态"
+
+msgid "Restarting..."
+msgstr "正在重启..."
+
+msgid "Configured Proxies"
+msgstr "已配置的代理"
+
+msgid "No proxies configured. Go to Proxy List tab to add proxies."
+msgstr "未配置代理。前往代理列表标签页添加代理。"
+
+msgid "Policy Routing Rules"
+msgstr "策略路由规则"
+
+msgid "No policy routing rules active."
+msgstr "无活动的策略路由规则。"
