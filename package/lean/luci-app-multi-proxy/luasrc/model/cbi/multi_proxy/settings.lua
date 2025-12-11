@@ -13,7 +13,7 @@ m.on_after_commit = function(self)
     os.execute("/etc/init.d/multi_proxy restart >/dev/null 2>&1 &")
 end
 
-s = m:section(TypedSection, "multi_proxy", translate("General Settings"))
+s = m:section(NamedSection, "config", "multi_proxy", translate("General Settings"))
 s.anonymous = true
 s.addremove = false
 
@@ -46,5 +46,29 @@ o:value("5", translate("Notice"))
 o:value("6", translate("Info"))
 o:value("7", translate("Debug"))
 o.default = "4"
+
+-- API Settings Section
+s = m:section(NamedSection, "config", "multi_proxy", translate("API Settings"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(Flag, "api_enabled", translate("Enable API"))
+o.rmempty = false
+o.default = "0"
+o.description = translate("Enable standalone HTTP API server (no authentication required, internal network only)")
+
+o = s:option(Value, "api_port", translate("API Port"))
+o.datatype = "port"
+o.default = "9088"
+o.description = translate("HTTP API server listening port")
+o:depends("api_enabled", "1")
+
+o = s:option(ListValue, "api_bind", translate("API Bind Address"))
+o:value("0.0.0.0", translate("All interfaces (0.0.0.0)"))
+o:value("127.0.0.1", translate("Localhost only (127.0.0.1)"))
+o:value("lan", translate("LAN interface IP"))
+o.default = "0.0.0.0"
+o.description = translate("Network interface to bind API server")
+o:depends("api_enabled", "1")
 
 return m
