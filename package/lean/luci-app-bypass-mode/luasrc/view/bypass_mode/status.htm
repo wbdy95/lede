@@ -20,7 +20,8 @@ local gateway6 = sys.exec("ip -6 route | grep default | awk '{print $3}' | head 
 local ipv6_forward = sys.exec("cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null"):gsub("%s+", "") == "1"
 
 -- Check NAT6 status
-local nat6_count = tonumber(sys.exec("ip6tables -t nat -L POSTROUTING -n 2>/dev/null | grep -c MASQUERADE"):gsub("%s+", "")) or 0
+local nat6_count_str = sys.exec("ip6tables -t nat -L POSTROUTING -n 2>/dev/null | grep -c MASQUERADE"):gsub("%s+", "")
+local nat6_count = tonumber(nat6_count_str) or 0
 local nat6_active = nat6_count > 0
 
 -- Connectivity test
