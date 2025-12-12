@@ -1,0 +1,485 @@
+#!/usr/bin/lua
+-- Multi-Proxy API Server
+-- Standalone HTTP API server without authentication
+
+local socket = require("socket")
+local uci = require("uci")
+local json = require("cjson")
+
+local API_VERSION = "1.0"
+
+-- Parse HTTP request
+local function parse_request(client)
+    local request_line = client:receive()
+    if not request_line then return nil end
+
+    local method, path, version = request_line:match("^(%u+)%s+([^%s]+)%s+HTTP/([%d%.]+)")
+    if not method then return nil end
+
+    -- Parse headers
+    local headers = {}
+    while true do
+        local line = client:receive()
+        if not line or line == "" then break end
+        local key, value = line:match("^([^:]+):%s*(.+)$")
+        if key then
+            headers[key:lower()] = value
+        end
+    end
+
+    -- Parse body for POST requests
+    local body = ""
+    local content_length = tonumber(headers["content-length"] or 0)
+    if content_length > 0 then
+        body = client:receive(content_length)
+    end
+
+    -- Parse query string
+    local query = {}
+    local path_only, query_string = path:match("^([^?]+)%??(.*)$")
+    if query_string and query_string ~= "" then
+        for k, v in query_string:gmatch("([^&=]+)=([^&]*)") do
+            query[k] = v:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+        end
+    end
+
+    -- Parse POST body (form-urlencoded)
+    if method == "POST" and body ~= "" then
+        for k, v in body:gmatch("([^&=]+)=([^&]*)") do
+            query[k] = v:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+            query[k] = query[k]:gsub("+", " ")
+        end
+    end
+
+    return {
+        method = method,
+        path = path_only or path,
+        version = version,
+        headers = headers,
+        body = body,
+        query = query
+    }
+end
+
+-- Send HTTP response
+local function send_response(client, status, body, content_type)
+    content_type = content_type or "application/json"
+    local status_text = {
+        [200] = "OK",
+        [400] = "Bad Request",
+        [404] = "Not Found",
+        [405] = "Method Not Allowed",
+        [500] = "Internal Server Error"
+    }
+
+    local response = string.format(
+        "HTTP/1.1 %d %s\r\n" ..
+        "Content-Type: %s\r\n" ..
+        "Content-Length: %d\r\n" ..
+        "Access-Control-Allow-Origin: *\r\n" ..
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" ..
+        "Access-Control-Allow-Headers: Content-Type\r\n" ..
+        "Connection: close\r\n" ..
+        "\r\n" ..
+        "%s",
+        status, status_text[status] or "Unknown", content_type, #body, body
+    )
+
+    client:send(response)
+end
+
+-- JSON response helper
+local function json_response(client, status, data)
+    send_response(client, status, json.encode(data), "application/json")
+end
+
+-- UCI cursor
+local function get_cursor()
+    return uci.cursor()
+end
+
+-- API: Get service status
+local function api_status()
+    local cursor = get_cursor()
+    local result = {
+        enabled = cursor:get("multi_proxy", "config", "enabled") == "1",
+        running = os.execute("pgrep -f redsocks2 > /dev/null 2>&1") == 0,
+        proxies = {}
+    }
+
+    cursor:foreach("multi_proxy", "proxy", function(s)
+        local proxy = {
+            id = s[".name"],
+            name = s.name or s[".name"],
+            enabled = s.enabled == "1",
+            type = s.type or "socks5",
+            server = s.server,
+            port = s.port,
+            source_ips = s.source_ip or {}
+        }
+        if type(proxy.source_ips) == "string" then
+            proxy.source_ips = {proxy.source_ips}
+        end
+        table.insert(result.proxies, proxy)
+    end)
+
+    -- Get iptables rule count
+    local handle = io.popen("iptables -t nat -L MULTI_PROXY_NAT 2>/dev/null | wc -l")
+    local rule_count = tonumber(handle:read("*a")) or 0
+    handle:close()
+    result.rule_count = math.max(0, rule_count - 2)
+
+    return {status = "ok", data = result}
+end
+
+-- API: Start service
+local function api_start()
+    local result = os.execute("/etc/init.d/multi_proxy start >/dev/null 2>&1")
+    if result == 0 then
+        return {status = "ok", message = "Service started"}
+    else
+        return {status = "error", message = "Failed to start service"}
+    end
+end
+
+-- API: Stop service
+local function api_stop()
+    local result = os.execute("/etc/init.d/multi_proxy stop >/dev/null 2>&1")
+    if result == 0 then
+        return {status = "ok", message = "Service stopped"}
+    else
+        return {status = "error", message = "Failed to stop service"}
+    end
+end
+
+-- API: Restart service
+local function api_restart()
+    local result = os.execute("/etc/init.d/multi_proxy restart >/dev/null 2>&1")
+    if result == 0 then
+        return {status = "ok", message = "Service restarted"}
+    else
+        return {status = "error", message = "Failed to restart service"}
+    end
+end
+
+-- API: List proxies
+local function api_proxy_list()
+    local cursor = get_cursor()
+    local proxies = {}
+
+    cursor:foreach("multi_proxy", "proxy", function(s)
+        local proxy = {
+            id = s[".name"],
+            name = s.name or s[".name"],
+            enabled = s.enabled == "1",
+            type = s.type or "socks5",
+            server = s.server or "",
+            port = s.port or "",
+            username = s.username or "",
+            source_ips = s.source_ip or {}
+        }
+        if type(proxy.source_ips) == "string" then
+            proxy.source_ips = {proxy.source_ips}
+        end
+        table.insert(proxies, proxy)
+    end)
+
+    return {status = "ok", proxies = proxies}
+end
+
+-- API: Get single proxy
+local function api_proxy_get(query)
+    local id = query.id
+    if not id or id == "" then
+        return {status = "error", message = "Missing proxy id"}
+    end
+
+    local cursor = get_cursor()
+    local proxy_type = cursor:get("multi_proxy", id)
+
+    if proxy_type ~= "proxy" then
+        return {status = "error", message = "Proxy not found"}
+    end
+
+    local source_ips = cursor:get("multi_proxy", id, "source_ip") or {}
+    if type(source_ips) == "string" then
+        source_ips = {source_ips}
+    end
+
+    local proxy = {
+        id = id,
+        name = cursor:get("multi_proxy", id, "name") or id,
+        enabled = cursor:get("multi_proxy", id, "enabled") == "1",
+        type = cursor:get("multi_proxy", id, "type") or "socks5",
+        server = cursor:get("multi_proxy", id, "server") or "",
+        port = cursor:get("multi_proxy", id, "port") or "",
+        username = cursor:get("multi_proxy", id, "username") or "",
+        source_ips = source_ips
+    }
+
+    return {status = "ok", proxy = proxy}
+end
+
+-- API: Add proxy
+local function api_proxy_add(query)
+    local name = query.name
+    local proxy_type = query.type or "socks5"
+    local server = query.server
+    local port = query.port
+    local username = query.username or ""
+    local password = query.password or ""
+    local source_ips = query.source_ips
+    local enabled = query.enabled
+
+    -- Validate required fields
+    if not name or name == "" then
+        return {status = "error", message = "Missing proxy name"}
+    end
+    if not server or server == "" then
+        return {status = "error", message = "Missing server address"}
+    end
+    if not port or port == "" then
+        return {status = "error", message = "Missing server port"}
+    end
+    if not source_ips or source_ips == "" then
+        return {status = "error", message = "Missing source IPs"}
+    end
+
+    local cursor = get_cursor()
+    local section_id = cursor:add("multi_proxy", "proxy")
+
+    cursor:set("multi_proxy", section_id, "name", name)
+    cursor:set("multi_proxy", section_id, "enabled", enabled == "1" and "1" or "1")
+    cursor:set("multi_proxy", section_id, "type", proxy_type)
+    cursor:set("multi_proxy", section_id, "server", server)
+    cursor:set("multi_proxy", section_id, "port", port)
+
+    if username ~= "" then
+        cursor:set("multi_proxy", section_id, "username", username)
+    end
+    if password ~= "" then
+        cursor:set("multi_proxy", section_id, "password", password)
+    end
+
+    -- Parse source IPs (comma separated)
+    local ips = {}
+    for ip in source_ips:gmatch("[^,]+") do
+        ip = ip:match("^%s*(.-)%s*$") -- trim whitespace
+        if ip ~= "" then
+            table.insert(ips, ip)
+        end
+    end
+
+    if #ips > 0 then
+        cursor:set("multi_proxy", section_id, "source_ip", ips)
+    end
+
+    cursor:commit("multi_proxy")
+
+    -- Restart service to apply changes
+    os.execute("/etc/init.d/multi_proxy restart >/dev/null 2>&1 &")
+
+    return {status = "ok", message = "Proxy added successfully", id = section_id}
+end
+
+-- API: Delete proxy
+local function api_proxy_delete(query)
+    local id = query.id
+    if not id or id == "" then
+        return {status = "error", message = "Missing proxy id"}
+    end
+
+    local cursor = get_cursor()
+    local proxy_type = cursor:get("multi_proxy", id)
+
+    if proxy_type ~= "proxy" then
+        return {status = "error", message = "Proxy not found"}
+    end
+
+    cursor:delete("multi_proxy", id)
+    cursor:commit("multi_proxy")
+
+    -- Restart service to apply changes
+    os.execute("/etc/init.d/multi_proxy restart >/dev/null 2>&1 &")
+
+    return {status = "ok", message = "Proxy deleted successfully"}
+end
+
+-- API: Update proxy
+local function api_proxy_update(query)
+    local id = query.id
+    if not id or id == "" then
+        return {status = "error", message = "Missing proxy id"}
+    end
+
+    local cursor = get_cursor()
+    local proxy_type = cursor:get("multi_proxy", id)
+
+    if proxy_type ~= "proxy" then
+        return {status = "error", message = "Proxy not found"}
+    end
+
+    -- Update fields if provided
+    if query.name and query.name ~= "" then
+        cursor:set("multi_proxy", id, "name", query.name)
+    end
+    if query.enabled then
+        cursor:set("multi_proxy", id, "enabled", query.enabled == "1" and "1" or "0")
+    end
+    if query.type and query.type ~= "" then
+        cursor:set("multi_proxy", id, "type", query.type)
+    end
+    if query.server and query.server ~= "" then
+        cursor:set("multi_proxy", id, "server", query.server)
+    end
+    if query.port and query.port ~= "" then
+        cursor:set("multi_proxy", id, "port", query.port)
+    end
+    if query.username then
+        if query.username ~= "" then
+            cursor:set("multi_proxy", id, "username", query.username)
+        else
+            cursor:delete("multi_proxy", id, "username")
+        end
+    end
+    if query.password then
+        if query.password ~= "" then
+            cursor:set("multi_proxy", id, "password", query.password)
+        else
+            cursor:delete("multi_proxy", id, "password")
+        end
+    end
+    if query.source_ips then
+        local ips = {}
+        for ip in query.source_ips:gmatch("[^,]+") do
+            ip = ip:match("^%s*(.-)%s*$")
+            if ip ~= "" then
+                table.insert(ips, ip)
+            end
+        end
+        if #ips > 0 then
+            cursor:set("multi_proxy", id, "source_ip", ips)
+        else
+            cursor:delete("multi_proxy", id, "source_ip")
+        end
+    end
+
+    cursor:commit("multi_proxy")
+
+    -- Restart service to apply changes
+    os.execute("/etc/init.d/multi_proxy restart >/dev/null 2>&1 &")
+
+    return {status = "ok", message = "Proxy updated successfully"}
+end
+
+-- Route API requests
+local function handle_request(request)
+    local path = request.path
+    local method = request.method
+    local query = request.query
+
+    -- Handle CORS preflight
+    if method == "OPTIONS" then
+        return 200, {status = "ok"}
+    end
+
+    -- API routes
+    if path == "/api/status" then
+        return 200, api_status()
+    elseif path == "/api/start" then
+        if method ~= "POST" then return 405, {status = "error", message = "Method not allowed"} end
+        return 200, api_start()
+    elseif path == "/api/stop" then
+        if method ~= "POST" then return 405, {status = "error", message = "Method not allowed"} end
+        return 200, api_stop()
+    elseif path == "/api/restart" then
+        if method ~= "POST" then return 405, {status = "error", message = "Method not allowed"} end
+        return 200, api_restart()
+    elseif path == "/api/proxy/list" then
+        return 200, api_proxy_list()
+    elseif path == "/api/proxy/get" then
+        return 200, api_proxy_get(query)
+    elseif path == "/api/proxy/add" then
+        if method ~= "POST" then return 405, {status = "error", message = "Method not allowed"} end
+        return 200, api_proxy_add(query)
+    elseif path == "/api/proxy/delete" then
+        if method ~= "POST" then return 405, {status = "error", message = "Method not allowed"} end
+        return 200, api_proxy_delete(query)
+    elseif path == "/api/proxy/update" then
+        if method ~= "POST" then return 405, {status = "error", message = "Method not allowed"} end
+        return 200, api_proxy_update(query)
+    elseif path == "/" or path == "/api" then
+        return 200, {
+            status = "ok",
+            version = API_VERSION,
+            endpoints = {
+                "GET  /api/status",
+                "POST /api/start",
+                "POST /api/stop",
+                "POST /api/restart",
+                "GET  /api/proxy/list",
+                "GET  /api/proxy/get?id=xxx",
+                "POST /api/proxy/add",
+                "POST /api/proxy/delete",
+                "POST /api/proxy/update"
+            }
+        }
+    else
+        return 404, {status = "error", message = "Not found"}
+    end
+end
+
+-- Main server loop
+local function main()
+    -- Get configuration
+    local cursor = get_cursor()
+    local api_enabled = cursor:get("multi_proxy", "config", "api_enabled")
+    local api_port = cursor:get("multi_proxy", "config", "api_port") or "9088"
+    local api_bind = cursor:get("multi_proxy", "config", "api_bind") or "0.0.0.0"
+
+    if api_enabled ~= "1" then
+        print("API server is disabled")
+        os.exit(0)
+    end
+
+    -- Handle 'lan' bind option
+    if api_bind == "lan" then
+        local handle = io.popen("ip -4 addr show br-lan 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -1")
+        api_bind = handle:read("*l") or "0.0.0.0"
+        handle:close()
+    end
+
+    local server = socket.tcp()
+    server:setoption("reuseaddr", true)
+
+    local ok, err = server:bind(api_bind, tonumber(api_port))
+    if not ok then
+        print("Failed to bind to " .. api_bind .. ":" .. api_port .. ": " .. err)
+        os.exit(1)
+    end
+
+    server:listen(32)
+    print("Multi-Proxy API server listening on " .. api_bind .. ":" .. api_port)
+
+    while true do
+        local client = server:accept()
+        if client then
+            client:settimeout(10)
+            local ok, err = pcall(function()
+                local request = parse_request(client)
+                if request then
+                    local status, data = handle_request(request)
+                    json_response(client, status, data)
+                end
+            end)
+            if not ok then
+                pcall(function()
+                    json_response(client, 500, {status = "error", message = "Internal server error"})
+                end)
+            end
+            client:close()
+        end
+    end
+end
+
+main()
