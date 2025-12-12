@@ -6,6 +6,28 @@ local m, s, o
 m = Map("multi_proxy", translate("Proxy List"),
     translate("Configure upstream proxies and assign internal IPs to each proxy."))
 
+-- Add inline CSS to fix password field alignment
+m.description = m.description .. [[
+<style type="text/css">
+.cbi-section-table .cbi-input-password {
+    display: inline-flex !important;
+    align-items: center !important;
+    vertical-align: middle !important;
+}
+.cbi-section-table .cbi-input-password input {
+    flex: 1 !important;
+    min-width: 60px !important;
+}
+.cbi-section-table .cbi-input-password .cbi-button {
+    flex-shrink: 0 !important;
+    margin-left: 2px !important;
+}
+.cbi-section-table td {
+    vertical-align: middle !important;
+}
+</style>
+]]
+
 -- Apply changes and restart service
 m.on_after_commit = function(self)
     os.execute("/etc/init.d/multi_proxy restart >/dev/null 2>&1 &")
