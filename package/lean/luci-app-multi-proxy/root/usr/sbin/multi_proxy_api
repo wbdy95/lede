@@ -236,7 +236,7 @@ local function api_proxy_get(query)
     return {status = "ok", proxy = proxy}
 end
 
--- API: Add proxy
+-- API: Add or Update proxy (upsert by source_ip)
 local function api_proxy_add(query)
     local name = query.name
     local proxy_type = query.type or "socks5"
@@ -261,22 +261,6 @@ local function api_proxy_add(query)
         return {status = "error", message = "Missing source IPs"}
     end
 
-    local cursor = get_cursor()
-    local section_id = cursor:add("multi_proxy", "proxy")
-
-    cursor:set("multi_proxy", section_id, "name", name)
-    cursor:set("multi_proxy", section_id, "enabled", enabled == "1" and "1" or "1")
-    cursor:set("multi_proxy", section_id, "type", proxy_type)
-    cursor:set("multi_proxy", section_id, "server", server)
-    cursor:set("multi_proxy", section_id, "port", port)
-
-    if username ~= "" then
-        cursor:set("multi_proxy", section_id, "username", username)
-    end
-    if password ~= "" then
-        cursor:set("multi_proxy", section_id, "password", password)
-    end
-
     -- Parse source IPs (comma separated)
     local ips = {}
     for ip in source_ips:gmatch("[^,]+") do
@@ -286,16 +270,71 @@ local function api_proxy_add(query)
         end
     end
 
-    if #ips > 0 then
-        cursor:set("multi_proxy", section_id, "source_ip", ips)
+    if #ips == 0 then
+        return {status = "error", message = "Missing source IPs"}
     end
+
+    local cursor = get_cursor()
+
+    -- Check if any source_ip already exists in another proxy
+    local existing_id = nil
+    cursor:foreach("multi_proxy", "proxy", function(s)
+        local existing_ips = s.source_ip or {}
+        if type(existing_ips) == "string" then
+            existing_ips = {existing_ips}
+        end
+        for _, existing_ip in ipairs(existing_ips) do
+            for _, new_ip in ipairs(ips) do
+                if existing_ip == new_ip then
+                    existing_id = s[".name"]
+                    return false -- stop iteration
+                end
+            end
+        end
+    end)
+
+    local section_id
+    local is_update = false
+
+    if existing_id then
+        -- Update existing proxy
+        section_id = existing_id
+        is_update = true
+    else
+        -- Create new proxy
+        section_id = cursor:add("multi_proxy", "proxy")
+    end
+
+    cursor:set("multi_proxy", section_id, "name", name)
+    cursor:set("multi_proxy", section_id, "enabled", (enabled == "0") and "0" or "1")
+    cursor:set("multi_proxy", section_id, "type", proxy_type)
+    cursor:set("multi_proxy", section_id, "server", server)
+    cursor:set("multi_proxy", section_id, "port", port)
+
+    if username ~= "" then
+        cursor:set("multi_proxy", section_id, "username", username)
+    else
+        cursor:delete("multi_proxy", section_id, "username")
+    end
+
+    if password ~= "" then
+        cursor:set("multi_proxy", section_id, "password", password)
+    else
+        cursor:delete("multi_proxy", section_id, "password")
+    end
+
+    cursor:set("multi_proxy", section_id, "source_ip", ips)
 
     cursor:commit("multi_proxy")
 
     -- Reload proxies without restarting API
     os.execute("/etc/init.d/multi_proxy reload_proxies >/dev/null 2>&1 &")
 
-    return {status = "ok", message = "Proxy added successfully", id = section_id}
+    if is_update then
+        return {status = "ok", message = "Proxy updated successfully", id = section_id, action = "updated"}
+    else
+        return {status = "ok", message = "Proxy added successfully", id = section_id, action = "added"}
+    end
 end
 
 -- API: Delete proxy
