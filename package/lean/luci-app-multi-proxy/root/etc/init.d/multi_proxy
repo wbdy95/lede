@@ -15,6 +15,10 @@ BASE_PORT="12300"
 RT_TABLE_BASE="100"
 FWMARK_BASE="100"
 PROXY_INDEX=0
+API_ENABLED="0"
+API_PORT="9088"
+API_BIND="0.0.0.0"
+API_PID_FILE="/var/run/multi_proxy_api.pid"
 
 log_msg() {
     local level="$1"
@@ -30,6 +34,9 @@ load_config() {
     config_get BASE_PORT config base_port "12300"
     config_get RT_TABLE_BASE config rt_table_base "100"
     config_get FWMARK_BASE config fwmark_base "100"
+    config_get API_ENABLED config api_enabled "0"
+    config_get API_PORT config api_port "9088"
+    config_get API_BIND config api_bind "0.0.0.0"
 }
 
 # Clean up all iptables rules and routing
@@ -79,6 +86,47 @@ cleanup() {
     rm -rf "$REDSOCKS_CONF_DIR"
 
     log_msg "info" "Cleanup completed"
+}
+
+# Start API server
+start_api() {
+    if [ "$API_ENABLED" = "1" ]; then
+        log_msg "info" "Starting API server on $API_BIND:$API_PORT..."
+
+        # Stop existing API server
+        stop_api
+
+        # Start API server in background
+        /usr/sbin/multi_proxy_api &
+        local pid=$!
+        echo "$pid" > "$API_PID_FILE"
+
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            log_msg "info" "API server started (pid: $pid)"
+            echo "API server started on $API_BIND:$API_PORT"
+        else
+            log_msg "error" "Failed to start API server"
+            echo "Failed to start API server"
+        fi
+    else
+        log_msg "info" "API server is disabled"
+    fi
+}
+
+# Stop API server
+stop_api() {
+    if [ -f "$API_PID_FILE" ]; then
+        local pid=$(cat "$API_PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            log_msg "info" "Stopped API server (pid: $pid)"
+        fi
+        rm -f "$API_PID_FILE"
+    fi
+    # Also kill by process name (compatible with busybox)
+    killall multi_proxy_api 2>/dev/null
+    sleep 1
 }
 
 # Generate redsocks2 config for a proxy
@@ -327,6 +375,9 @@ start() {
         echo "Warning: No proxies configured or all proxies failed to start"
         cleanup
     fi
+
+    # Start API server
+    start_api
 }
 
 stop() {
@@ -335,6 +386,7 @@ stop() {
 
     load_config
     cleanup
+    stop_api
 
     log_msg "info" "Multi-proxy service stopped"
     echo "Multi-proxy service stopped"
@@ -368,6 +420,19 @@ status() {
         echo "Status: RUNNING ($running_instances instance(s))"
     else
         echo "Status: STOPPED"
+    fi
+    echo ""
+
+    # API status
+    echo "--- API Server ---"
+    if [ "$API_ENABLED" = "1" ]; then
+        if pgrep -f "multi_proxy_api" >/dev/null 2>&1; then
+            echo "API: RUNNING on $API_BIND:$API_PORT"
+        else
+            echo "API: ENABLED but NOT RUNNING"
+        fi
+    else
+        echo "API: DISABLED"
     fi
     echo ""
 
