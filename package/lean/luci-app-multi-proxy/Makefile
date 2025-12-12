@@ -13,7 +13,7 @@ PKG_LICENSE:=Apache-2.0
 
 LUCI_TITLE:=LuCI Multi-Proxy Manager
 LUCI_DESCRIPTION:=Per-IP SOCKS5/HTTP proxy routing with iptables and policy routing
-LUCI_DEPENDS:=+redsocks2 +ip-full +iptables-mod-extra +kmod-ipt-extra +kmod-ipt-nat +kmod-ipt-tproxy
+LUCI_DEPENDS:=+redsocks2 +ip-full +iptables-mod-extra +kmod-ipt-extra +kmod-ipt-nat +kmod-ipt-tproxy +lua-cjson +luasocket
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk
