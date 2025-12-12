@@ -402,6 +402,56 @@ reload() {
     restart
 }
 
+# Reload only proxies (redsocks2) without restarting API
+reload_proxies() {
+    log_msg "info" "Reloading proxy configurations..."
+
+    load_config
+
+    if [ "$ENABLED" != "1" ]; then
+        log_msg "info" "Multi-proxy service is disabled"
+        return 0
+    fi
+
+    # Stop redsocks2 instances and clean iptables, but keep API running
+    cleanup
+
+    mkdir -p "$REDSOCKS_CONF_DIR"
+
+    # Enable route_localnet
+    for iface in /proc/sys/net/ipv4/conf/*/route_localnet; do
+        echo 1 > "$iface" 2>/dev/null
+    done
+
+    # Create iptables chains
+    iptables -t mangle -N MULTI_PROXY_MARK 2>/dev/null
+    iptables -t mangle -A PREROUTING -j MULTI_PROXY_MARK
+
+    iptables -t nat -N MULTI_PROXY_NAT 2>/dev/null
+    iptables -t nat -A PREROUTING -j MULTI_PROXY_NAT
+
+    # Skip local addresses in mangle
+    iptables -t mangle -A MULTI_PROXY_MARK -d 10.0.0.0/8 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 172.16.0.0/12 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 192.168.0.0/16 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 127.0.0.0/8 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 224.0.0.0/4 -j RETURN
+
+    PROXY_INDEX=0
+
+    config_load multi_proxy
+    config_foreach process_proxy proxy
+
+    if [ $PROXY_INDEX -gt 0 ]; then
+        log_msg "info" "Proxies reloaded: $PROXY_INDEX proxy(ies) active"
+        echo "Proxies reloaded: $PROXY_INDEX proxy(ies) active"
+        touch "$REDSOCKS_CONF_DIR/running"
+    else
+        log_msg "warn" "No proxies configured or all proxies failed"
+        echo "Warning: No proxies configured"
+    fi
+}
+
 status() {
     load_config
 

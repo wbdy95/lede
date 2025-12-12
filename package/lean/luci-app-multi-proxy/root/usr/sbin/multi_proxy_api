@@ -292,8 +292,8 @@ local function api_proxy_add(query)
 
     cursor:commit("multi_proxy")
 
-    -- Restart service to apply changes
-    os.execute("/etc/init.d/multi_proxy restart >/dev/null 2>&1 &")
+    -- Reload proxies without restarting API
+    os.execute("/etc/init.d/multi_proxy reload_proxies >/dev/null 2>&1 &")
 
     return {status = "ok", message = "Proxy added successfully", id = section_id}
 end
@@ -315,8 +315,8 @@ local function api_proxy_delete(query)
     cursor:delete("multi_proxy", id)
     cursor:commit("multi_proxy")
 
-    -- Restart service to apply changes
-    os.execute("/etc/init.d/multi_proxy restart >/dev/null 2>&1 &")
+    -- Reload proxies without restarting API
+    os.execute("/etc/init.d/multi_proxy reload_proxies >/dev/null 2>&1 &")
 
     return {status = "ok", message = "Proxy deleted successfully"}
 end
@@ -382,8 +382,8 @@ local function api_proxy_update(query)
 
     cursor:commit("multi_proxy")
 
-    -- Restart service to apply changes
-    os.execute("/etc/init.d/multi_proxy restart >/dev/null 2>&1 &")
+    -- Reload proxies without restarting API
+    os.execute("/etc/init.d/multi_proxy reload_proxies >/dev/null 2>&1 &")
 
     return {status = "ok", message = "Proxy updated successfully"}
 end

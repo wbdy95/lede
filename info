@@ -1,0 +1,27 @@
+/usr/lib/lua/luci/ucodebridge.lua:23: /usr/lib/lua/luci/template.lua:181: Failed to execute template 'cbi/map'.
+A runtime error occurred: /usr/lib/lua/luci/template.lua:181: Failed to execute template 'bypass_mode/status'.
+A runtime error occurred: [string "/usr/lib/lua/luci/view/bypass_mode/status.h..."]:18: bad argument #2 to 'tonumber' (base out of range)
+stack traceback:
+[C]: in function 'tonumber'
+[string "/usr/lib/lua/luci/view/bypass_mode/status.h..."]:18: in main chunk
+stack traceback:
+[C]: in function 'error'
+/usr/lib/lua/luci/template.lua:181: in function
+(tail call): ?
+/usr/lib/lua/luci/cbi.lua:257: in function 'render'
+/usr/lib/lua/luci/cbi.lua:266: in function 'render_children'
+[string "/usr/lib/lua/luci/view/cbi/map.htm"]:6: in main chunk
+
+In error(), file [C]
+called from function [anonymous function] (/usr/lib/lua/luci/ucodebridge.lua:23)
+called from function ((tail call))
+In [anonymous function](), file /usr/share/ucode/luci/runtime.uc, line 148, byte 45:
+  called from function [arrow function] (/usr/share/ucode/luci/dispatcher.uc:794:4)
+  called from function render ([C])
+  called from function render_action (/usr/share/ucode/luci/dispatcher.uc:768:24)
+  called from function run_action (/usr/share/ucode/luci/dispatcher.uc:795:4)
+  called from function [anonymous function] (/usr/share/ucode/luci/dispatcher.uc:1003:48)
+  called from anonymous function (/www/cgi-bin/luci:39:13)
+
+ `        return lcall.call(modname, method, ...args);`
+  Near here ----------------------------------------^
