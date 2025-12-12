@@ -43,11 +43,27 @@ local function parse_request(client)
         end
     end
 
-    -- Parse POST body (form-urlencoded)
+    -- Parse POST body
     if method == "POST" and body ~= "" then
-        for k, v in body:gmatch("([^&=]+)=([^&]*)") do
-            query[k] = v:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
-            query[k] = query[k]:gsub("+", " ")
+        local content_type = headers["content-type"] or ""
+        if content_type:match("application/json") then
+            -- Parse JSON body
+            local ok, json_data = pcall(json.decode, body)
+            if ok and type(json_data) == "table" then
+                for k, v in pairs(json_data) do
+                    if type(v) == "table" then
+                        query[k] = table.concat(v, ",")
+                    else
+                        query[k] = tostring(v)
+                    end
+                end
+            end
+        else
+            -- Parse form-urlencoded body
+            for k, v in body:gmatch("([^&=]+)=([^&]*)") do
+                query[k] = v:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+                query[k] = query[k]:gsub("+", " ")
+            end
         end
     end
 
