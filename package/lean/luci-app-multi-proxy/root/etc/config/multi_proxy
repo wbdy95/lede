@@ -7,6 +7,10 @@ config multi_proxy 'config'
     option rt_table_base '100'
     # fwmark base number
     option fwmark_base '100'
+    # API settings
+    option api_enabled '0'
+    option api_port '9088'
+    option api_bind '0.0.0.0'
 
 # Example proxy definition
 # config proxy
