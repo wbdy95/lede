@@ -5,6 +5,11 @@
 START=99
 STOP=10
 
+# Extra commands for reload_proxies
+EXTRA_COMMANDS="reload_proxies status"
+EXTRA_HELP="	reload_proxies	Reload proxy configurations without restarting API
+	status		Show service status"
+
 NAME="multi_proxy"
 REDSOCKS_CONF_DIR="/var/run/multi_proxy"
 LOG_FILE="/var/log/multi_proxy.log"
