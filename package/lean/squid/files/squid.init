@@ -1,0 +1,367 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2015 OpenWrt.org
+# Extended for LuCI integration
+
+START=90
+STOP=10
+
+USE_PROCD=1
+PROG=/usr/sbin/squid
+CONFIGFILE="/tmp/squid/squid.conf"
+MIMETABLE="/tmp/squid/mime.conf"
+IPTABLES_CHAIN="SQUID_INTERCEPT"
+
+# Clean up iptables rules for transparent proxy
+cleanup_iptables() {
+	# Remove jump rules from PREROUTING
+	iptables -t nat -D PREROUTING -j $IPTABLES_CHAIN 2>/dev/null
+
+	# Flush and delete the chain
+	iptables -t nat -F $IPTABLES_CHAIN 2>/dev/null
+	iptables -t nat -X $IPTABLES_CHAIN 2>/dev/null
+}
+
+# Setup iptables rules for transparent proxy
+setup_iptables() {
+	local intercept_port="$1"
+	local intercept_all_lan="$2"
+
+	# Clean up first
+	cleanup_iptables
+
+	# Create chain
+	iptables -t nat -N $IPTABLES_CHAIN 2>/dev/null
+
+	# Skip traffic to local networks
+	iptables -t nat -A $IPTABLES_CHAIN -d 127.0.0.0/8 -j RETURN
+	iptables -t nat -A $IPTABLES_CHAIN -d 10.0.0.0/8 -j RETURN
+	iptables -t nat -A $IPTABLES_CHAIN -d 172.16.0.0/12 -j RETURN
+	iptables -t nat -A $IPTABLES_CHAIN -d 192.168.0.0/16 -j RETURN
+
+	# Redirect HTTP traffic (port 80) to Squid intercept port
+	if [ "$intercept_all_lan" -eq 1 ]; then
+		# Intercept all LAN traffic
+		iptables -t nat -A $IPTABLES_CHAIN -p tcp --dport 80 -j REDIRECT --to-port $intercept_port
+	else
+		# Only intercept traffic from specific source IPs (configured via intercept_ip list)
+		config_list_foreach squid intercept_ip setup_intercept_ip "$intercept_port"
+	fi
+
+	# Insert jump rule at the beginning of PREROUTING
+	iptables -t nat -I PREROUTING -j $IPTABLES_CHAIN
+}
+
+# Setup iptables rule for a specific source IP
+setup_intercept_ip() {
+	local src_ip="$1"
+	local intercept_port="$2"
+
+	[ -z "$src_ip" ] && return
+
+	iptables -t nat -A $IPTABLES_CHAIN -s "$src_ip" -p tcp --dport 80 -j REDIRECT --to-port "$intercept_port"
+}
+
+validate_squid_section() {
+	uci_load_validate squid squid "$1" "$2" \
+		'enabled:bool:0' \
+		'config_file:string:/etc/squid/squid.conf' \
+		'http_port:port:3128' \
+		'http_port_options:string' \
+		'intercept_enabled:bool:0' \
+		'intercept_port:port:3129' \
+		'intercept_all_lan:bool:0' \
+		'ssldb:string' \
+		'ssldb_options:string:-M 4MB' \
+		'ssl_bump_enabled:bool:0' \
+		'ssl_cert:string' \
+		'ssl_key:string' \
+		'coredump_dir:string:/tmp/squid' \
+		'visible_hostname:string:OpenWrt' \
+		'pinger_enable:string:off' \
+		'mime_table:string:/etc/squid/mime.conf' \
+		'cache_mem:uinteger:64' \
+		'maximum_object_size_in_memory:uinteger:512' \
+		'cache_dir_enabled:bool:0' \
+		'cache_dir:string:/var/cache/squid' \
+		'cache_dir_size:uinteger:100' \
+		'maximum_object_size:uinteger:4096' \
+		'minimum_object_size:uinteger:0' \
+		'access_log:bool:0' \
+		'cache_log:bool:0' \
+		'log_dir:string:/tmp/squid' \
+		'debug_level:uinteger:0' \
+		'connect_timeout:uinteger:60' \
+		'read_timeout:uinteger:15' \
+		'request_timeout:uinteger:5' \
+		'client_lifetime:uinteger:1440' \
+		'half_closed_clients:string:off' \
+		'forwarded_for:string:off' \
+		'via:string:off' \
+		'dns_v4_first:bool:1' \
+		'dns_nameservers:string' \
+		'max_filedescriptors:uinteger:0' \
+		'workers:uinteger:1'
+}
+
+generate_acl() {
+	local section="$1"
+	local enabled name type
+
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -eq 0 ] && return
+
+	config_get name "$section" name
+	config_get type "$section" type "src"
+
+	[ -z "$name" ] && return
+
+	config_list_foreach "$section" entry append_acl_entry "$name" "$type"
+}
+
+append_acl_entry() {
+	local entry="$1"
+	local name="$2"
+	local type="$3"
+
+	echo "acl $name $type $entry" >> $CONFIGFILE
+}
+
+generate_http_access() {
+	local section="$1"
+	local enabled action acl order comment
+
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -eq 0 ] && return
+
+	config_get action "$section" action "allow"
+	config_get acl "$section" acl
+	config_get order "$section" order 50
+	config_get comment "$section" comment
+
+	[ -z "$acl" ] && return
+
+	# Store for sorting
+	echo "$order http_access $action $acl" >> /tmp/squid_access_rules.tmp
+}
+
+generate_upstream() {
+	local section="$1"
+	local enabled name host port type options
+
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -eq 0 ] && return
+
+	config_get name "$section" name
+	config_get host "$section" host
+	config_get port "$section" port 3128
+	config_get type "$section" type "parent"
+	config_get options "$section" options "no-query default"
+
+	[ -z "$host" ] && return
+
+	echo "cache_peer $host $type $port 0 $options" >> $CONFIGFILE
+}
+
+generate_refresh_pattern() {
+	local section="$1"
+	local enabled pattern min percent max options
+
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -eq 0 ] && return
+
+	config_get pattern "$section" pattern
+	config_get min "$section" min 0
+	config_get percent "$section" percent 20
+	config_get max "$section" max 4320
+	config_get options "$section" options
+
+	[ -z "$pattern" ] && return
+
+	if [ -n "$options" ]; then
+		echo "refresh_pattern $options $pattern $min $percent% $max" >> $CONFIGFILE
+	else
+		echo "refresh_pattern $pattern $min $percent% $max" >> $CONFIGFILE
+	fi
+}
+
+start_squid_instance() {
+	local config_dir
+
+	[ "$2" = 0 ] || {
+		echo "validation failed"
+		return 1
+	}
+
+	# Check if enabled
+	[ "$enabled" -eq 0 ] && {
+		echo "Squid is disabled"
+		return 0
+	}
+
+	config_dir=$(dirname $CONFIGFILE)
+	[ -d "$config_dir" ] || mkdir -p "$config_dir"
+	chown squid:squid "$config_dir" 2>/dev/null || chown nobody:nogroup "$config_dir"
+
+	[ -d "$coredump_dir" ] || mkdir -p "$coredump_dir"
+	chown squid:squid "$coredump_dir" 2>/dev/null || chown nobody:nogroup "$coredump_dir"
+
+	[ -d "$log_dir" ] || mkdir -p "$log_dir"
+	chown squid:squid "$log_dir" 2>/dev/null || chown nobody:nogroup "$log_dir"
+
+	# SSL database setup
+	if [ "$ssl_bump_enabled" -eq 1 ] && [ -n "$ssldb" ]; then
+		[ -d "$ssldb" ] || mkdir -p "$ssldb"
+		[ -f "$ssldb/size" ] || /usr/lib/squid/security_file_certgen -c -s "$ssldb" $ssldb_options 2>/dev/null
+		chown -R squid:squid "$ssldb" 2>/dev/null || chown -R nobody:nogroup "$ssldb"
+	fi
+
+	# Start with base config
+	cat "$config_file" > $CONFIGFILE
+
+	# Basic settings
+	echo "" >> $CONFIGFILE
+	echo "# Generated settings from UCI" >> $CONFIGFILE
+	echo "http_port $http_port $http_port_options" >> $CONFIGFILE
+
+	# Transparent proxy port (intercept mode)
+	if [ "$intercept_enabled" -eq 1 ] && [ -n "$intercept_port" ]; then
+		echo "http_port $intercept_port intercept" >> $CONFIGFILE
+	fi
+
+	echo "visible_hostname $visible_hostname" >> $CONFIGFILE
+	echo "coredump_dir $coredump_dir" >> $CONFIGFILE
+	echo "pinger_enable $pinger_enable" >> $CONFIGFILE
+
+	# Cache settings
+	echo "cache_mem ${cache_mem} MB" >> $CONFIGFILE
+	echo "maximum_object_size_in_memory ${maximum_object_size_in_memory} KB" >> $CONFIGFILE
+	echo "maximum_object_size ${maximum_object_size} KB" >> $CONFIGFILE
+	echo "minimum_object_size ${minimum_object_size} KB" >> $CONFIGFILE
+
+	# Disk cache
+	if [ "$cache_dir_enabled" -eq 1 ]; then
+		[ -d "$cache_dir" ] || mkdir -p "$cache_dir"
+		chown squid:squid "$cache_dir" 2>/dev/null || chown nobody:nogroup "$cache_dir"
+		echo "cache_dir ufs $cache_dir $cache_dir_size 16 256" >> $CONFIGFILE
+	fi
+
+	# Logging
+	if [ "$access_log" -eq 1 ]; then
+		echo "access_log daemon:$log_dir/access.log" >> $CONFIGFILE
+	else
+		echo "access_log none" >> $CONFIGFILE
+	fi
+
+	if [ "$cache_log" -eq 1 ]; then
+		echo "cache_log $log_dir/cache.log" >> $CONFIGFILE
+	else
+		echo "cache_log /dev/null" >> $CONFIGFILE
+	fi
+
+	# Debug options
+	if [ "$debug_level" -gt 0 ]; then
+		echo "debug_options ALL,$debug_level" >> $CONFIGFILE
+	fi
+
+	# Timeouts
+	echo "connect_timeout ${connect_timeout} seconds" >> $CONFIGFILE
+	echo "read_timeout ${read_timeout} minutes" >> $CONFIGFILE
+	echo "request_timeout ${request_timeout} minutes" >> $CONFIGFILE
+	echo "client_lifetime ${client_lifetime} minutes" >> $CONFIGFILE
+	echo "half_closed_clients $half_closed_clients" >> $CONFIGFILE
+
+	# Privacy settings
+	echo "forwarded_for $forwarded_for" >> $CONFIGFILE
+	echo "via $via" >> $CONFIGFILE
+
+	# DNS settings
+	if [ "$dns_v4_first" -eq 1 ]; then
+		echo "dns_v4_first on" >> $CONFIGFILE
+	fi
+	[ -n "$dns_nameservers" ] && echo "dns_nameservers $dns_nameservers" >> $CONFIGFILE
+
+	# Workers
+	[ "$workers" -gt 1 ] && echo "workers $workers" >> $CONFIGFILE
+
+	# Max file descriptors
+	[ "$max_filedescriptors" -gt 0 ] && echo "max_filedescriptors $max_filedescriptors" >> $CONFIGFILE
+
+	# SSL Bump configuration
+	if [ "$ssl_bump_enabled" -eq 1 ]; then
+		echo "" >> $CONFIGFILE
+		echo "# SSL Bump Configuration" >> $CONFIGFILE
+		[ -n "$ssl_cert" ] && [ -n "$ssl_key" ] && {
+			echo "http_port $http_port ssl-bump cert=$ssl_cert key=$ssl_key generate-host-certificates=on dynamic_cert_mem_cache_size=4MB" >> $CONFIGFILE
+			echo "sslcrtd_program /usr/lib/squid/security_file_certgen -s $ssldb $ssldb_options" >> $CONFIGFILE
+			echo "acl step1 at_step SslBump1" >> $CONFIGFILE
+			echo "ssl_bump peek step1" >> $CONFIGFILE
+			echo "ssl_bump bump all" >> $CONFIGFILE
+		}
+	fi
+
+	# Generate ACLs from UCI
+	echo "" >> $CONFIGFILE
+	echo "# Custom ACLs from UCI" >> $CONFIGFILE
+	config_foreach generate_acl acl
+
+	# Generate HTTP access rules
+	rm -f /tmp/squid_access_rules.tmp
+	config_foreach generate_http_access http_access
+
+	if [ -f /tmp/squid_access_rules.tmp ]; then
+		echo "" >> $CONFIGFILE
+		echo "# Custom access rules from UCI" >> $CONFIGFILE
+		sort -n /tmp/squid_access_rules.tmp | cut -d' ' -f2- >> $CONFIGFILE
+		rm -f /tmp/squid_access_rules.tmp
+	fi
+
+	# Generate upstream proxies
+	echo "" >> $CONFIGFILE
+	config_foreach generate_upstream upstream
+
+	# Generate refresh patterns
+	echo "" >> $CONFIGFILE
+	echo "# Custom refresh patterns from UCI" >> $CONFIGFILE
+	config_foreach generate_refresh_pattern refresh_pattern
+
+	# MIME table
+	cat "$mime_table" > $MIMETABLE 2>/dev/null
+	echo "mime_table $MIMETABLE" >> $CONFIGFILE
+
+	# Initialize cache if disk cache enabled
+	if [ "$cache_dir_enabled" -eq 1 ]; then
+		$PROG -s -f $CONFIGFILE -N -z 2>/dev/null
+	fi
+
+	# Setup iptables rules for transparent proxy
+	if [ "$intercept_enabled" -eq 1 ] && [ -n "$intercept_port" ]; then
+		setup_iptables "$intercept_port" "$intercept_all_lan"
+	fi
+
+	procd_open_instance
+	procd_set_param command $PROG -s -f $CONFIGFILE -N
+	procd_set_param file $CONFIGFILE
+	procd_set_param respawn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+start_service() {
+	config_load squid
+	validate_squid_section squid start_squid_instance
+}
+
+stop_service() {
+	$PROG -f $CONFIGFILE -N -k shutdown 2>/dev/null
+	cleanup_iptables
+}
+
+reload_service() {
+	$PROG -f $CONFIGFILE -N -k reconfigure 2>/dev/null
+}
+
+service_triggers() {
+	procd_add_reload_trigger "squid"
+	procd_add_validation validate_squid_section
+}
