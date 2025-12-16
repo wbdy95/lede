@@ -303,7 +303,7 @@ start_redsocks_instance() {
     log_msg "info" "Starting redsocks2 with config: $conf_file"
 
     # Increase file descriptor limit for high concurrency
-    ulimit -n 65535 2>/dev/null
+    ulimit -n 655350 2>/dev/null
 
     # Start redsocks2
     redsocks2 -c "$conf_file" -p "$pid_file" 2>&1 | while read line; do
@@ -378,7 +378,7 @@ start() {
     log_msg "info" "Enabled route_localnet for all interfaces"
 
     # Optimize kernel parameters for high concurrency
-    echo 65535 > /proc/sys/fs/file-max 2>/dev/null
+    echo 655350 > /proc/sys/fs/file-max 2>/dev/null
     echo 65535 > /proc/sys/net/core/somaxconn 2>/dev/null
     echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null
     echo 30 > /proc/sys/net/ipv4/tcp_fin_timeout 2>/dev/null
@@ -466,7 +466,7 @@ reload_proxies() {
     done
 
     # Optimize kernel parameters for high concurrency
-    echo 65535 > /proc/sys/fs/file-max 2>/dev/null
+    echo 655350 > /proc/sys/fs/file-max 2>/dev/null
     echo 65535 > /proc/sys/net/core/somaxconn 2>/dev/null
     echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null
     echo 30 > /proc/sys/net/ipv4/tcp_fin_timeout 2>/dev/null
