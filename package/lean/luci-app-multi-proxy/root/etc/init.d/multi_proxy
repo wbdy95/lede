@@ -1,6 +1,7 @@
 #!/bin/sh /etc/rc.common
 # Copyright (C) 2024 OpenWrt.org
 # Multi-Proxy service script - Per-IP SOCKS5/HTTP proxy routing
+# Optimized with ipset for high performance (supports thousands of devices)
 
 START=99
 STOP=10
@@ -13,6 +14,7 @@ EXTRA_HELP="	reload_proxies	Reload proxy configurations without restarting API
 NAME="multi_proxy"
 REDSOCKS_CONF_DIR="/var/run/multi_proxy"
 LOG_FILE="/var/log/multi_proxy.log"
+IPSET_PREFIX="mp_proxy_"
 
 # Global variables
 ENABLED="0"
@@ -32,27 +34,9 @@ log_msg() {
     logger -t "$NAME" -p "daemon.$level" "$*"
 }
 
-# Get configuration values
-load_config() {
-    config_load multi_proxy
-    config_get ENABLED config enabled "0"
-    config_get BASE_PORT config base_port "12300"
-    config_get RT_TABLE_BASE config rt_table_base "100"
-    config_get FWMARK_BASE config fwmark_base "100"
-    config_get API_ENABLED config api_enabled "0"
-    config_get API_PORT config api_port "9088"
-    config_get API_BIND config api_bind "0.0.0.0"
-}
-
-# Clean up all iptables rules and routing
+# Clean up all iptables rules, ipsets and routing
 cleanup() {
-    log_msg "info" "Cleaning up iptables rules and routing tables..."
-
-    # Remove UDP blocking rules
-    local src_ip
-    for src_ip in $(iptables -L FORWARD -n | grep "udp" | grep "DROP" | awk '{print $4}' | sort -u); do
-        iptables -D FORWARD -s "$src_ip" -p udp -j DROP 2>/dev/null
-    done
+    log_msg "info" "Cleaning up iptables rules, ipsets and routing tables..."
 
     # Remove iptables chains
     iptables -t nat -D PREROUTING -j MULTI_PROXY_NAT 2>/dev/null
@@ -62,6 +46,11 @@ cleanup() {
     iptables -t mangle -D PREROUTING -j MULTI_PROXY_MARK 2>/dev/null
     iptables -t mangle -F MULTI_PROXY_MARK 2>/dev/null
     iptables -t mangle -X MULTI_PROXY_MARK 2>/dev/null
+
+    # Remove UDP blocking chain
+    iptables -D FORWARD -j MULTI_PROXY_UDP_BLOCK 2>/dev/null
+    iptables -F MULTI_PROXY_UDP_BLOCK 2>/dev/null
+    iptables -X MULTI_PROXY_UDP_BLOCK 2>/dev/null
 
     # Remove ip rules and routes
     local i=0
@@ -74,6 +63,12 @@ cleanup() {
         ip rule del fwmark "$fwmark" table "$rt_table" 2>/dev/null
         ip route flush table "$rt_table" 2>/dev/null
         i=$((i + 1))
+    done
+
+    # Destroy all ipsets created by us
+    for ipset_name in $(ipset list -n 2>/dev/null | grep "^${IPSET_PREFIX}"); do
+        ipset destroy "$ipset_name" 2>/dev/null
+        log_msg "info" "Destroyed ipset: $ipset_name"
     done
 
     # Kill all redsocks2 instances started by us
@@ -91,6 +86,18 @@ cleanup() {
     rm -rf "$REDSOCKS_CONF_DIR"
 
     log_msg "info" "Cleanup completed"
+}
+
+# Get configuration values
+load_config() {
+    config_load multi_proxy
+    config_get ENABLED config enabled "0"
+    config_get BASE_PORT config base_port "12300"
+    config_get RT_TABLE_BASE config rt_table_base "100"
+    config_get FWMARK_BASE config fwmark_base "100"
+    config_get API_ENABLED config api_enabled "0"
+    config_get API_PORT config api_port "9088"
+    config_get API_BIND config api_bind "0.0.0.0"
 }
 
 # Start API server
@@ -195,7 +202,7 @@ generate_redsocks_config() {
     return 0
 }
 
-# Setup iptables and routing for a proxy
+# Setup iptables and routing for a proxy using ipset
 setup_routing() {
     local section="$1"
     local index="$2"
@@ -210,13 +217,16 @@ setup_routing() {
     local local_port=$((BASE_PORT + index))
     local fwmark=$((FWMARK_BASE + index))
     local rt_table=$((RT_TABLE_BASE + index))
+    local ipset_name="${IPSET_PREFIX}${index}"
 
     # Get source IPs for this proxy
     local source_ips=""
+    local ip_count=0
 
     # Use callback to collect source IPs
     append_ip() {
         source_ips="$source_ips $1"
+        ip_count=$((ip_count + 1))
     }
     config_list_foreach "$section" source_ip append_ip
 
@@ -228,7 +238,7 @@ setup_routing() {
         return 1
     }
 
-    log_msg "info" "Source IPs for $name: $source_ips"
+    log_msg "info" "Proxy $name: $ip_count source IPs configured"
 
     # Get default gateway
     local gateway=$(ip route | grep "^default" | awk '{print $3}' | head -1)
@@ -237,35 +247,45 @@ setup_routing() {
         return 1
     }
 
+    # Create ipset for this proxy (hash:ip for O(1) lookup)
+    ipset create "$ipset_name" hash:ip hashsize 4096 maxelem 65536 2>/dev/null
+    if [ $? -ne 0 ]; then
+        log_msg "error" "Failed to create ipset $ipset_name"
+        return 1
+    fi
+
+    # Add all source IPs to ipset (batch add for performance)
+    for src_ip in $source_ips; do
+        ipset add "$ipset_name" "$src_ip" 2>/dev/null
+    done
+
+    log_msg "info" "Created ipset $ipset_name with $ip_count IPs"
+
     # Setup routing table
     ip route add default via "$gateway" table "$rt_table" 2>/dev/null
     ip rule add fwmark "$fwmark" table "$rt_table" priority $((1000 + index)) 2>/dev/null
 
     log_msg "info" "Created routing table $rt_table with fwmark $fwmark for proxy $name (gateway: $gateway)"
 
-    # Add iptables rules for each source IP
-    for src_ip in $source_ips; do
-        # Mark traffic from this source IP
-        iptables -t mangle -A MULTI_PROXY_MARK -s "$src_ip" -j MARK --set-mark "$fwmark"
+    # Add iptables rules using ipset match (single rule per proxy, O(1) lookup)
+    # Mark traffic from IPs in this ipset
+    iptables -t mangle -A MULTI_PROXY_MARK -m set --match-set "$ipset_name" src -j MARK --set-mark "$fwmark"
 
-        # Block all UDP traffic to force TCP (so traffic goes through proxy)
-        iptables -I FORWARD -s "$src_ip" -p udp -j DROP
+    # Block UDP traffic for IPs in this ipset
+    iptables -A MULTI_PROXY_UDP_BLOCK -m set --match-set "$ipset_name" src -p udp -j DROP
 
-        # For forwarded traffic (from LAN devices), use DNAT to redirect to redsocks
-        # Skip local/private destinations
-        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d 10.0.0.0/8 -j RETURN
-        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d 172.16.0.0/12 -j RETURN
-        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d 192.168.0.0/16 -j RETURN
-        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d 127.0.0.0/8 -j RETURN
-        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d 224.0.0.0/4 -j RETURN
-        # Skip traffic to the proxy server itself to prevent loops
-        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -d "$server" -j RETURN
+    # NAT rules for this proxy (skip private destinations, then redirect)
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d 224.0.0.0/4 -j RETURN
+    # Skip traffic to the proxy server itself to prevent loops
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d "$server" -j RETURN
+    # Redirect to redsocks
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -j DNAT --to-destination 127.0.0.1:"$local_port"
 
-        # Use DNAT for forwarded traffic (works for traffic passing through router)
-        iptables -t nat -A MULTI_PROXY_NAT -s "$src_ip" -p tcp -j DNAT --to-destination 127.0.0.1:"$local_port"
-
-        log_msg "info" "Added rules for $src_ip -> proxy $name (fwmark $fwmark, DNAT to 127.0.0.1:$local_port, UDP blocked)"
-    done
+    log_msg "info" "Added iptables rules for proxy $name using ipset $ipset_name (DNAT to 127.0.0.1:$local_port)"
 
     return 0
 }
@@ -359,6 +379,10 @@ start() {
     iptables -t nat -N MULTI_PROXY_NAT 2>/dev/null
     iptables -t nat -A PREROUTING -j MULTI_PROXY_NAT
 
+    # Create UDP blocking chain
+    iptables -N MULTI_PROXY_UDP_BLOCK 2>/dev/null
+    iptables -I FORWARD -j MULTI_PROXY_UDP_BLOCK
+
     # Skip local addresses in mangle (these won't be marked)
     iptables -t mangle -A MULTI_PROXY_MARK -d 10.0.0.0/8 -j RETURN
     iptables -t mangle -A MULTI_PROXY_MARK -d 172.16.0.0/12 -j RETURN
@@ -435,6 +459,10 @@ reload_proxies() {
     iptables -t nat -N MULTI_PROXY_NAT 2>/dev/null
     iptables -t nat -A PREROUTING -j MULTI_PROXY_NAT
 
+    # Create UDP blocking chain
+    iptables -N MULTI_PROXY_UDP_BLOCK 2>/dev/null
+    iptables -I FORWARD -j MULTI_PROXY_UDP_BLOCK
+
     # Skip local addresses in mangle
     iptables -t mangle -A MULTI_PROXY_MARK -d 10.0.0.0/8 -j RETURN
     iptables -t mangle -A MULTI_PROXY_MARK -d 172.16.0.0/12 -j RETURN
@@ -495,12 +523,23 @@ status() {
     ps w 2>/dev/null | grep "redsocks2" | grep -v grep || echo "No instances running"
     echo ""
 
+    echo "--- ipsets ---"
+    for ipset_name in $(ipset list -n 2>/dev/null | grep "^${IPSET_PREFIX}"); do
+        local count=$(ipset list "$ipset_name" 2>/dev/null | grep -c "^[0-9]" || echo "0")
+        echo "$ipset_name: $count IPs"
+    done
+    echo ""
+
     echo "--- iptables mangle rules ---"
     iptables -t mangle -L MULTI_PROXY_MARK -n -v 2>/dev/null || echo "Chain not found"
     echo ""
 
     echo "--- iptables nat rules ---"
     iptables -t nat -L MULTI_PROXY_NAT -n -v 2>/dev/null || echo "Chain not found"
+    echo ""
+
+    echo "--- iptables UDP block rules ---"
+    iptables -L MULTI_PROXY_UDP_BLOCK -n -v 2>/dev/null || echo "Chain not found"
     echo ""
 
     echo "--- IP rules ---"
