@@ -174,14 +174,15 @@ generate_redsocks_config() {
         http-relay) rs_type="http-relay" ;;
     esac
 
-    # Generate config file with bind/relay format
+    # Generate config file with bind/relay format (optimized for high concurrency)
     {
         echo 'base {'
-        echo '    log_debug = on;'
-        echo '    log_info = on;'
+        echo '    log_debug = off;'
+        echo '    log_info = off;'
         echo '    log = "syslog:daemon";'
         echo '    daemon = on;'
         echo '    redirector = iptables;'
+        echo '    reuseport = on;'
         echo '}'
         echo ''
         echo 'redsocks {'
@@ -189,7 +190,8 @@ generate_redsocks_config() {
         echo "    relay = \"${server}:${port}\";"
         echo "    type = ${rs_type};"
         echo '    autoproxy = 0;'
-        echo '    timeout = 10;'
+        echo '    timeout = 30;'
+        echo '    redsocks_conn_max = 50000;'
         if [ -n "$username" ] && [ -n "$password" ]; then
             echo "    login = \"${username}\";"
             echo "    password = \"${password}\";"
@@ -300,6 +302,9 @@ start_redsocks_instance() {
 
     log_msg "info" "Starting redsocks2 with config: $conf_file"
 
+    # Increase file descriptor limit for high concurrency
+    ulimit -n 65535 2>/dev/null
+
     # Start redsocks2
     redsocks2 -c "$conf_file" -p "$pid_file" 2>&1 | while read line; do
         log_msg "info" "redsocks2: $line"
@@ -371,6 +376,14 @@ start() {
         echo 1 > "$iface" 2>/dev/null
     done
     log_msg "info" "Enabled route_localnet for all interfaces"
+
+    # Optimize kernel parameters for high concurrency
+    echo 65535 > /proc/sys/fs/file-max 2>/dev/null
+    echo 65535 > /proc/sys/net/core/somaxconn 2>/dev/null
+    echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null
+    echo 30 > /proc/sys/net/ipv4/tcp_fin_timeout 2>/dev/null
+    echo "1024 65535" > /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null
+    log_msg "info" "Optimized kernel parameters for high concurrency"
 
     # Create iptables chains
     iptables -t mangle -N MULTI_PROXY_MARK 2>/dev/null
@@ -451,6 +464,13 @@ reload_proxies() {
     for iface in /proc/sys/net/ipv4/conf/*/route_localnet; do
         echo 1 > "$iface" 2>/dev/null
     done
+
+    # Optimize kernel parameters for high concurrency
+    echo 65535 > /proc/sys/fs/file-max 2>/dev/null
+    echo 65535 > /proc/sys/net/core/somaxconn 2>/dev/null
+    echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null
+    echo 30 > /proc/sys/net/ipv4/tcp_fin_timeout 2>/dev/null
+    echo "1024 65535" > /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null
 
     # Create iptables chains
     iptables -t mangle -N MULTI_PROXY_MARK 2>/dev/null
