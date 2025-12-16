@@ -191,7 +191,6 @@ generate_redsocks_config() {
         echo "    type = ${rs_type};"
         echo '    autoproxy = 0;'
         echo '    timeout = 30;'
-        echo '    redsocks_conn_max = 50000;'
         if [ -n "$username" ] && [ -n "$password" ]; then
             echo "    login = \"${username}\";"
             echo "    password = \"${password}\";"
