@@ -378,6 +378,7 @@ start() {
 
     # Optimize kernel parameters for high concurrency
     echo 655350 > /proc/sys/fs/file-max 2>/dev/null
+    echo 655350 > /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null
     echo 65535 > /proc/sys/net/core/somaxconn 2>/dev/null
     echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null
     echo 30 > /proc/sys/net/ipv4/tcp_fin_timeout 2>/dev/null
@@ -466,6 +467,7 @@ reload_proxies() {
 
     # Optimize kernel parameters for high concurrency
     echo 655350 > /proc/sys/fs/file-max 2>/dev/null
+    echo 655350 > /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null
     echo 65535 > /proc/sys/net/core/somaxconn 2>/dev/null
     echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null
     echo 30 > /proc/sys/net/ipv4/tcp_fin_timeout 2>/dev/null
