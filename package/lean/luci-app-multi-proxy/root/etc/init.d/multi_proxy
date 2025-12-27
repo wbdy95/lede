@@ -169,6 +169,13 @@ setup_connlimit() {
         return 0
     fi
 
+    # Test if connlimit module is working
+    if ! iptables -m connlimit --help >/dev/null 2>&1; then
+        log_msg "warn" "iptables connlimit module not available or incompatible"
+        echo "Warning: Connection limit disabled - connlimit module not working"
+        return 1
+    fi
+
     log_msg "info" "Setting up connection limit: max $CONNLIMIT_MAX connections per IP"
 
     # Create connection limit chain
@@ -207,6 +214,13 @@ setup_bandwidth_limit() {
     if [ "$BWLIMIT_ENABLED" != "1" ]; then
         log_msg "info" "Bandwidth limit is disabled"
         return 0
+    fi
+
+    # Check if tc command is available
+    if ! command -v tc >/dev/null 2>&1; then
+        log_msg "warn" "tc command not found, bandwidth limit requires tc-full or tc-tiny package"
+        echo "Warning: Bandwidth limit disabled - tc command not available"
+        return 1
     fi
 
     local lan_iface=$(get_lan_iface)
@@ -294,6 +308,11 @@ setup_bandwidth_limit() {
 
 # Cleanup bandwidth limit
 cleanup_bandwidth_limit() {
+    # Check if tc command is available
+    if ! command -v tc >/dev/null 2>&1; then
+        return 0
+    fi
+
     local lan_iface=$(get_lan_iface)
     if [ -n "$lan_iface" ]; then
         tc qdisc del dev "$lan_iface" root 2>/dev/null
