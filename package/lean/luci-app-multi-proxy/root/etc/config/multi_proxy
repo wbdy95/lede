@@ -11,6 +11,13 @@ config multi_proxy 'config'
     option api_enabled '0'
     option api_port '9088'
     option api_bind '0.0.0.0'
+    # Connection limit settings (per client IP)
+    option connlimit_enabled '0'
+    option connlimit_max '100'
+    # Bandwidth limit settings (per client IP, in kbps)
+    option bwlimit_enabled '0'
+    option bwlimit_down '10240'
+    option bwlimit_up '5120'
 
 # Example proxy definition
 # config proxy

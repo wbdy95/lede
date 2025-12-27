@@ -27,6 +27,13 @@ API_PORT="9088"
 API_BIND="0.0.0.0"
 API_PID_FILE="/var/run/multi_proxy_api.pid"
 
+# Connection and bandwidth limit variables
+CONNLIMIT_ENABLED="0"
+CONNLIMIT_MAX="100"
+BWLIMIT_ENABLED="0"
+BWLIMIT_DOWN="10240"
+BWLIMIT_UP="5120"
+
 log_msg() {
     local level="$1"
     shift
@@ -51,6 +58,14 @@ cleanup() {
     iptables -D FORWARD -j MULTI_PROXY_UDP_BLOCK 2>/dev/null
     iptables -F MULTI_PROXY_UDP_BLOCK 2>/dev/null
     iptables -X MULTI_PROXY_UDP_BLOCK 2>/dev/null
+
+    # Remove connection limit chain
+    iptables -D FORWARD -j MULTI_PROXY_CONNLIMIT 2>/dev/null
+    iptables -F MULTI_PROXY_CONNLIMIT 2>/dev/null
+    iptables -X MULTI_PROXY_CONNLIMIT 2>/dev/null
+
+    # Remove bandwidth limit (tc qdisc)
+    cleanup_bandwidth_limit
 
     # Remove ip rules and routes
     local i=0
@@ -98,6 +113,12 @@ load_config() {
     config_get API_ENABLED config api_enabled "0"
     config_get API_PORT config api_port "9088"
     config_get API_BIND config api_bind "0.0.0.0"
+    # Connection and bandwidth limit settings
+    config_get CONNLIMIT_ENABLED config connlimit_enabled "0"
+    config_get CONNLIMIT_MAX config connlimit_max "100"
+    config_get BWLIMIT_ENABLED config bwlimit_enabled "0"
+    config_get BWLIMIT_DOWN config bwlimit_down "10240"
+    config_get BWLIMIT_UP config bwlimit_up "5120"
 }
 
 # Start API server
@@ -139,6 +160,154 @@ stop_api() {
     # Also kill by process name (compatible with busybox)
     killall multi_proxy_api 2>/dev/null
     sleep 1
+}
+
+# Setup connection limit using iptables connlimit
+setup_connlimit() {
+    if [ "$CONNLIMIT_ENABLED" != "1" ]; then
+        log_msg "info" "Connection limit is disabled"
+        return 0
+    fi
+
+    log_msg "info" "Setting up connection limit: max $CONNLIMIT_MAX connections per IP"
+
+    # Create connection limit chain
+    iptables -N MULTI_PROXY_CONNLIMIT 2>/dev/null
+    iptables -I FORWARD -j MULTI_PROXY_CONNLIMIT
+
+    # Apply connlimit to all proxy ipsets
+    for ipset_name in $(ipset list -n 2>/dev/null | grep "^${IPSET_PREFIX}"); do
+        # Limit concurrent connections per source IP
+        iptables -A MULTI_PROXY_CONNLIMIT -m set --match-set "$ipset_name" src \
+            -m connlimit --connlimit-above "$CONNLIMIT_MAX" --connlimit-mask 32 \
+            -j DROP
+        log_msg "info" "Added connlimit rule for $ipset_name (max: $CONNLIMIT_MAX)"
+    done
+
+    log_msg "info" "Connection limit setup completed"
+}
+
+# Get LAN interface name
+get_lan_iface() {
+    # Try to get from network config
+    local iface=$(uci get network.lan.device 2>/dev/null || uci get network.lan.ifname 2>/dev/null)
+    if [ -z "$iface" ]; then
+        # Fallback: find br-lan or eth0
+        if [ -e /sys/class/net/br-lan ]; then
+            iface="br-lan"
+        elif [ -e /sys/class/net/eth0 ]; then
+            iface="eth0"
+        fi
+    fi
+    echo "$iface"
+}
+
+# Setup bandwidth limit using tc
+setup_bandwidth_limit() {
+    if [ "$BWLIMIT_ENABLED" != "1" ]; then
+        log_msg "info" "Bandwidth limit is disabled"
+        return 0
+    fi
+
+    local lan_iface=$(get_lan_iface)
+    if [ -z "$lan_iface" ]; then
+        log_msg "error" "Cannot determine LAN interface for bandwidth limit"
+        return 1
+    fi
+
+    log_msg "info" "Setting up bandwidth limit on $lan_iface: down=${BWLIMIT_DOWN}kbps, up=${BWLIMIT_UP}kbps"
+
+    # Clean existing qdisc
+    tc qdisc del dev "$lan_iface" root 2>/dev/null
+    tc qdisc del dev "$lan_iface" ingress 2>/dev/null
+
+    # Setup egress (download from router to client) using HTB
+    tc qdisc add dev "$lan_iface" root handle 1: htb default 999
+    tc class add dev "$lan_iface" parent 1: classid 1:1 htb rate 1000mbit ceil 1000mbit
+
+    # Create default class for unlimited traffic
+    tc class add dev "$lan_iface" parent 1:1 classid 1:999 htb rate 1000mbit ceil 1000mbit
+
+    # Create bandwidth limited class for proxy users
+    local class_id=10
+    for ipset_name in $(ipset list -n 2>/dev/null | grep "^${IPSET_PREFIX}"); do
+        # Create class with bandwidth limit
+        tc class add dev "$lan_iface" parent 1:1 classid 1:$class_id htb \
+            rate "${BWLIMIT_DOWN}kbit" ceil "${BWLIMIT_DOWN}kbit"
+
+        # Add fair queueing to the class
+        tc qdisc add dev "$lan_iface" parent 1:$class_id handle $class_id: sfq perturb 10
+
+        # Use iptables to mark packets and tc filter to match
+        # Mark packets destined to proxy users
+        iptables -t mangle -A POSTROUTING -o "$lan_iface" \
+            -m set --match-set "$ipset_name" dst \
+            -j MARK --set-mark $((200 + class_id))
+
+        # Filter marked packets to the limited class
+        tc filter add dev "$lan_iface" parent 1: protocol ip prio 1 \
+            handle $((200 + class_id)) fw classid 1:$class_id
+
+        log_msg "info" "Added bandwidth limit for $ipset_name (class 1:$class_id, ${BWLIMIT_DOWN}kbps)"
+        class_id=$((class_id + 1))
+    done
+
+    # Setup ingress (upload from client to router) using IFB
+    # Check if ifb module is available
+    if modprobe ifb 2>/dev/null; then
+        ip link add ifb0 type ifb 2>/dev/null
+        ip link set ifb0 up 2>/dev/null
+
+        # Redirect ingress to ifb0
+        tc qdisc add dev "$lan_iface" ingress 2>/dev/null
+        tc filter add dev "$lan_iface" parent ffff: protocol ip u32 \
+            match u32 0 0 action mirred egress redirect dev ifb0 2>/dev/null
+
+        # Setup HTB on ifb0
+        tc qdisc add dev ifb0 root handle 1: htb default 999
+        tc class add dev ifb0 parent 1: classid 1:1 htb rate 1000mbit ceil 1000mbit
+        tc class add dev ifb0 parent 1:1 classid 1:999 htb rate 1000mbit ceil 1000mbit
+
+        class_id=10
+        for ipset_name in $(ipset list -n 2>/dev/null | grep "^${IPSET_PREFIX}"); do
+            tc class add dev ifb0 parent 1:1 classid 1:$class_id htb \
+                rate "${BWLIMIT_UP}kbit" ceil "${BWLIMIT_UP}kbit"
+            tc qdisc add dev ifb0 parent 1:$class_id handle $class_id: sfq perturb 10
+
+            # Mark upload packets from proxy users
+            iptables -t mangle -A PREROUTING -i "$lan_iface" \
+                -m set --match-set "$ipset_name" src \
+                -j MARK --set-mark $((300 + class_id))
+
+            tc filter add dev ifb0 parent 1: protocol ip prio 1 \
+                handle $((300 + class_id)) fw classid 1:$class_id
+
+            log_msg "info" "Added upload limit for $ipset_name (${BWLIMIT_UP}kbps)"
+            class_id=$((class_id + 1))
+        done
+    else
+        log_msg "warn" "IFB module not available, upload limit not applied"
+    fi
+
+    log_msg "info" "Bandwidth limit setup completed"
+}
+
+# Cleanup bandwidth limit
+cleanup_bandwidth_limit() {
+    local lan_iface=$(get_lan_iface)
+    if [ -n "$lan_iface" ]; then
+        tc qdisc del dev "$lan_iface" root 2>/dev/null
+        tc qdisc del dev "$lan_iface" ingress 2>/dev/null
+    fi
+
+    # Clean IFB
+    tc qdisc del dev ifb0 root 2>/dev/null
+    ip link del ifb0 2>/dev/null
+
+    # Remove mangle marks for bandwidth limit
+    iptables -t mangle -F POSTROUTING 2>/dev/null
+
+    log_msg "info" "Bandwidth limit cleanup completed"
 }
 
 # Generate redsocks2 config for a proxy
@@ -412,6 +581,10 @@ start() {
         log_msg "info" "Multi-proxy service started with $PROXY_INDEX proxy(ies)"
         echo "Multi-proxy service started with $PROXY_INDEX proxy(ies)"
         touch "$REDSOCKS_CONF_DIR/running"
+
+        # Setup connection and bandwidth limits after proxies are configured
+        setup_connlimit
+        setup_bandwidth_limit
     else
         log_msg "warn" "No proxies configured or all proxies failed to start"
         echo "Warning: No proxies configured or all proxies failed to start"
@@ -500,6 +673,10 @@ reload_proxies() {
         log_msg "info" "Proxies reloaded: $PROXY_INDEX proxy(ies) active"
         echo "Proxies reloaded: $PROXY_INDEX proxy(ies) active"
         touch "$REDSOCKS_CONF_DIR/running"
+
+        # Setup connection and bandwidth limits after proxies are configured
+        setup_connlimit
+        setup_bandwidth_limit
     else
         log_msg "warn" "No proxies configured or all proxies failed"
         echo "Warning: No proxies configured"

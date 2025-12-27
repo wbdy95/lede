@@ -71,4 +71,42 @@ o.default = "0.0.0.0"
 o.description = translate("Network interface to bind API server")
 o:depends("api_enabled", "1")
 
+-- Connection Limit Settings Section
+s = m:section(NamedSection, "config", "multi_proxy", translate("Connection Limit"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(Flag, "connlimit_enabled", translate("Enable Connection Limit"))
+o.rmempty = false
+o.default = "0"
+o.description = translate("Limit concurrent connections per client IP to prevent abuse")
+
+o = s:option(Value, "connlimit_max", translate("Max Connections"))
+o.datatype = "uinteger"
+o.default = "100"
+o.description = translate("Maximum concurrent connections allowed per client IP")
+o:depends("connlimit_enabled", "1")
+
+-- Bandwidth Limit Settings Section
+s = m:section(NamedSection, "config", "multi_proxy", translate("Bandwidth Limit"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(Flag, "bwlimit_enabled", translate("Enable Bandwidth Limit"))
+o.rmempty = false
+o.default = "0"
+o.description = translate("Limit bandwidth per client IP using tc (traffic control)")
+
+o = s:option(Value, "bwlimit_down", translate("Download Speed (kbps)"))
+o.datatype = "uinteger"
+o.default = "10240"
+o.description = translate("Maximum download speed in kbps per client IP (e.g., 10240 = 10Mbps)")
+o:depends("bwlimit_enabled", "1")
+
+o = s:option(Value, "bwlimit_up", translate("Upload Speed (kbps)"))
+o.datatype = "uinteger"
+o.default = "5120"
+o.description = translate("Maximum upload speed in kbps per client IP (e.g., 5120 = 5Mbps)")
+o:depends("bwlimit_enabled", "1")
+
 return m
