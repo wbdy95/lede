@@ -63,6 +63,12 @@ function formatLastHandshake(timestamp) {
 	return Math.floor(diff / 86400) + '天前';
 }
 
+function shortenKey(key, length) {
+	if (!key) return '';
+	if (key.length <= length) return key;
+	return key.substring(0, length) + '...';
+}
+
 function getAllData() {
 	return Promise.all([
 		callStatus().catch(function(e) { return { error: e }; }),
@@ -90,5 +96,6 @@ return baseclass.extend({
 	generateQR: callGenerateQR,
 	getAllData: getAllData,
 	formatBytes: formatBytes,
-	formatLastHandshake: formatLastHandshake
+	formatLastHandshake: formatLastHandshake,
+	shortenKey: shortenKey
 });
