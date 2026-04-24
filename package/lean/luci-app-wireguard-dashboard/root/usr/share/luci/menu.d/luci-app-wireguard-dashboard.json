@@ -3,12 +3,10 @@
 		"title": "WireGuard Dashboard",
 		"order": 45,
 		"action": {
-			"type": "alias",
-			"path": "network/wireguard-dashboard"
+			"type": "firstchild"
 		},
 		"depends": {
-			"acl": ["luci-app-wireguard-dashboard"],
-			"uci": {"wireguard": true}
+			"acl": ["luci-app-wireguard-dashboard"]
 		}
 	},
 	"admin/network/wireguard-dashboard/status": {
