@@ -5,41 +5,41 @@
 /**
  * WireGuard Dashboard API
  * Package: luci-app-wireguard-dashboard
- * RPCD object: luci.wireguard-dashboard
+ * RPCD object: wireguard-dashboard
  */
 
 var callStatus = rpc.declare({
-	object: 'luci.wireguard-dashboard',
+	object: 'wireguard-dashboard',
 	method: 'status',
 	expect: { }
 });
 
 var callGetInterfaces = rpc.declare({
-	object: 'luci.wireguard-dashboard',
+	object: 'wireguard-dashboard',
 	method: 'interfaces',
 	expect: { }
 });
 
 var callGetPeers = rpc.declare({
-	object: 'luci.wireguard-dashboard',
+	object: 'wireguard-dashboard',
 	method: 'peers',
 	expect: { }
 });
 
 var callGetTraffic = rpc.declare({
-	object: 'luci.wireguard-dashboard',
+	object: 'wireguard-dashboard',
 	method: 'traffic',
 	expect: { }
 });
 
 var callGetConfig = rpc.declare({
-	object: 'luci.wireguard-dashboard',
+	object: 'wireguard-dashboard',
 	method: 'config',
 	expect: { }
 });
 
 var callGenerateQR = rpc.declare({
-	object: 'luci.wireguard-dashboard',
+	object: 'wireguard-dashboard',
 	method: 'generate_qr',
 	params: ['interface', 'peer'],
 	expect: { }
