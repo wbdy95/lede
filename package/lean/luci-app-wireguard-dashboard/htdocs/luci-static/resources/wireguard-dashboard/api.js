@@ -1,7 +1,6 @@
 'use strict';
 'require baseclass';
 'require rpc';
-'require promise';
 
 /**
  * WireGuard Dashboard API
@@ -65,7 +64,7 @@ function formatLastHandshake(timestamp) {
 }
 
 function getAllData() {
-	return promise.all([
+	return Promise.all([
 		callStatus().catch(function(e) { return { error: e }; }),
 		callGetInterfaces().catch(function(e) { return { interfaces: [] }; }),
 		callGetPeers().catch(function(e) { return { peers: [] }; }),
