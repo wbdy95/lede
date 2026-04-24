@@ -1,6 +1,7 @@
 'use strict';
 'require baseclass';
 'require rpc';
+'require promise';
 
 /**
  * WireGuard Dashboard API
@@ -14,48 +15,35 @@ var callStatus = rpc.declare({
 	expect: { }
 });
 
-var callGetPeers = rpc.declare({
-	object: 'luci.wireguard-dashboard',
-	method: 'get_peers',
-	expect: { peers: [] }
-});
-
 var callGetInterfaces = rpc.declare({
 	object: 'luci.wireguard-dashboard',
-	method: 'get_interfaces',
-	expect: { interfaces: [] }
-});
-
-var callGenerateKeys = rpc.declare({
-	object: 'luci.wireguard-dashboard',
-	method: 'generate_keys',
+	method: 'interfaces',
 	expect: { }
 });
 
-var callAddPeer = rpc.declare({
+var callGetPeers = rpc.declare({
 	object: 'luci.wireguard-dashboard',
-	method: 'add_peer',
-	params: ['interface', 'name', 'allowed_ips', 'public_key', 'preshared_key', 'endpoint', 'persistent_keepalive']
+	method: 'peers',
+	expect: { }
 });
 
-var callRemovePeer = rpc.declare({
+var callGetTraffic = rpc.declare({
 	object: 'luci.wireguard-dashboard',
-	method: 'remove_peer',
-	params: ['interface', 'public_key']
+	method: 'traffic',
+	expect: { }
 });
 
 var callGetConfig = rpc.declare({
 	object: 'luci.wireguard-dashboard',
-	method: 'get_config',
-	params: ['interface', 'peer'],
-	expect: { config: '' }
+	method: 'config',
+	expect: { }
 });
 
-var callGetQRCode = rpc.declare({
+var callGenerateQR = rpc.declare({
 	object: 'luci.wireguard-dashboard',
-	method: 'get_qrcode',
+	method: 'generate_qr',
 	params: ['interface', 'peer'],
-	expect: { qrcode: '' }
+	expect: { }
 });
 
 function formatBytes(bytes) {
@@ -67,24 +55,41 @@ function formatBytes(bytes) {
 }
 
 function formatLastHandshake(timestamp) {
-	if (!timestamp) return 'Never';
+	if (!timestamp || timestamp === 0) return '从未';
 	var now = Math.floor(Date.now() / 1000);
 	var diff = now - timestamp;
-	if (diff < 60) return diff + 's ago';
-	if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
-	if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-	return Math.floor(diff / 86400) + 'd ago';
+	if (diff < 60) return diff + '秒前';
+	if (diff < 3600) return Math.floor(diff / 60) + '分钟前';
+	if (diff < 86400) return Math.floor(diff / 3600) + '小时前';
+	return Math.floor(diff / 86400) + '天前';
+}
+
+function getAllData() {
+	return promise.all([
+		callStatus().catch(function(e) { return { error: e }; }),
+		callGetInterfaces().catch(function(e) { return { interfaces: [] }; }),
+		callGetPeers().catch(function(e) { return { peers: [] }; }),
+		callGetTraffic().catch(function(e) { return { interfaces: [], total_rx: 0, total_tx: 0 }; }),
+		callGetConfig().catch(function(e) { return { interfaces: [] }; })
+	]).then(function(results) {
+		return {
+			status: results[0],
+			interfaces: results[1],
+			peers: results[2],
+			traffic: results[3],
+			config: results[4]
+		};
+	});
 }
 
 return baseclass.extend({
 	getStatus: callStatus,
-	getPeers: callGetPeers,
 	getInterfaces: callGetInterfaces,
-	generateKeys: callGenerateKeys,
-	addPeer: callAddPeer,
-	removePeer: callRemovePeer,
+	getPeers: callGetPeers,
+	getTraffic: callGetTraffic,
 	getConfig: callGetConfig,
-	getQRCode: callGetQRCode,
+	generateQR: callGenerateQR,
+	getAllData: getAllData,
 	formatBytes: formatBytes,
 	formatLastHandshake: formatLastHandshake
 });
