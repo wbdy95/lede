@@ -69,6 +69,19 @@ function shortenKey(key, length) {
 	return key.substring(0, length) + '...';
 }
 
+function getPeerStatusClass(status) {
+	switch(status) {
+		case 'active':
+			return 'status-active';
+		case 'idle':
+			return 'status-idle';
+		case 'inactive':
+			return 'status-inactive';
+		default:
+			return 'status-unknown';
+	}
+}
+
 function getAllData() {
 	return Promise.all([
 		callStatus().catch(function(e) { return { error: e }; }),
@@ -97,5 +110,6 @@ return baseclass.extend({
 	getAllData: getAllData,
 	formatBytes: formatBytes,
 	formatLastHandshake: formatLastHandshake,
-	shortenKey: shortenKey
+	shortenKey: shortenKey,
+	getPeerStatusClass: getPeerStatusClass
 });
