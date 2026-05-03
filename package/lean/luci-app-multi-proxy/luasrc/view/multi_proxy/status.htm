@@ -1,0 +1,216 @@
+<%#
+Copyright 2024 OpenWrt.org
+Licensed to the public under the Apache License 2.0.
+-%>
+
+<%
+local sys = require "luci.sys"
+local uci = require "luci.model.uci".cursor()
+
+local enabled = uci:get("multi_proxy", "config", "enabled") == "1"
+local base_port = uci:get("multi_proxy", "config", "base_port") or "12300"
+
+-- Check if redsocks2 is running
+local running = sys.call("pgrep -f redsocks2 > /dev/null") == 0
+
+-- Get running instances
+local instances = sys.exec("ps w | grep redsocks2 | grep -v grep | wc -l"):gsub("%s+", "")
+instances = tonumber(instances) or 0
+
+-- Get iptables rules count
+local nat_rules = sys.exec("iptables -t nat -L MULTI_PROXY_NAT -n 2>/dev/null | tail -n +3 | wc -l"):gsub("%s+", "")
+nat_rules = tonumber(nat_rules) or 0
+
+local mangle_rules = sys.exec("iptables -t mangle -L MULTI_PROXY_MARK -n 2>/dev/null | tail -n +3 | wc -l"):gsub("%s+", "")
+mangle_rules = tonumber(mangle_rules) or 0
+
+-- Get configured proxies
+local proxies = {}
+uci:foreach("multi_proxy", "proxy", function(s)
+    local proxy = {
+        name = s.name or s[".name"],
+        enabled = s.enabled == "1",
+        type = s.type or "socks5",
+        server = s.server or "",
+        port = s.port or "",
+        source_ips = s.source_ip or {}
+    }
+    if type(proxy.source_ips) == "string" then
+        proxy.source_ips = {proxy.source_ips}
+    end
+    table.insert(proxies, proxy)
+end)
+
+-- Get IP rules
+local ip_rules = sys.exec("ip rule show 2>/dev/null | grep -E 'fwmark.*lookup' || true"):gsub("%s*$", "")
+-%>
+
+<style>
+.mp-status {
+    margin-bottom: 20px;
+}
+.mp-status .table {
+    width: 100%;
+}
+.mp-status .tr {
+    display: flex;
+    padding: 8px 0;
+    border-bottom: 1px solid #eee;
+}
+.mp-status .td {
+    flex: 1;
+}
+.mp-status .td:first-child {
+    font-weight: bold;
+    max-width: 200px;
+}
+.status-running {
+    color: #5cb85c;
+    font-weight: bold;
+}
+.status-stopped {
+    color: #d9534f;
+    font-weight: bold;
+}
+.proxy-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0;
+}
+.proxy-table th, .proxy-table td {
+    border: 1px solid #ddd;
+    padding: 8px;
+    text-align: left;
+}
+.proxy-table th {
+    background-color: #f5f5f5;
+}
+.proxy-enabled {
+    color: #5cb85c;
+}
+.proxy-disabled {
+    color: #999;
+}
+.ip-list {
+    font-family: monospace;
+    font-size: 12px;
+}
+.code-block {
+    background: #f5f5f5;
+    padding: 10px;
+    font-family: monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    border-radius: 4px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+.mp-actions {
+    margin-top: 15px;
+}
+.mp-actions input {
+    margin-right: 10px;
+}
+</style>
+
+<div class="mp-status">
+    <h3><%:Service Status%></h3>
+    <div class="table">
+        <div class="tr">
+            <div class="td"><%:Multi-Proxy Service%></div>
+            <div class="td">
+                <% if enabled then %>
+                    <span class="status-running"><%:Enabled%></span>
+                <% else %>
+                    <span class="status-stopped"><%:Disabled%></span>
+                <% end %>
+            </div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:Running Status%></div>
+            <div class="td">
+                <% if running then %>
+                    <span class="status-running"><%:Running%></span> (<%=instances%> <%:instances%>)
+                <% else %>
+                    <span class="status-stopped"><%:Stopped%></span>
+                <% end %>
+            </div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:NAT Rules%></div>
+            <div class="td"><%=nat_rules%> <%:rules%></div>
+        </div>
+        <div class="tr">
+            <div class="td"><%:Mangle Rules%></div>
+            <div class="td"><%=mangle_rules%> <%:rules%></div>
+        </div>
+    </div>
+
+    <div class="mp-actions">
+        <input type="button" class="btn cbi-button cbi-button-apply" value="<%:Restart Service%>" onclick="restartService()" />
+        <input type="button" class="btn cbi-button" value="<%:Refresh Status%>" onclick="location.reload()" />
+    </div>
+</div>
+
+<div class="mp-status">
+    <h3><%:Configured Proxies%></h3>
+    <% if #proxies > 0 then %>
+    <table class="proxy-table">
+        <thead>
+            <tr>
+                <th><%:Status%></th>
+                <th><%:Name%></th>
+                <th><%:Type%></th>
+                <th><%:Server%></th>
+                <th><%:Source IPs%></th>
+            </tr>
+        </thead>
+        <tbody>
+            <% for i, p in ipairs(proxies) do %>
+            <tr>
+                <td>
+                    <% if p.enabled then %>
+                        <span class="proxy-enabled"><%:Enabled%></span>
+                    <% else %>
+                        <span class="proxy-disabled"><%:Disabled%></span>
+                    <% end %>
+                </td>
+                <td><%=pcdata(p.name)%></td>
+                <td><%=pcdata(p.type)%></td>
+                <td><%=pcdata(p.server)%>:<%=pcdata(p.port)%></td>
+                <td class="ip-list">
+                    <% for j, ip in ipairs(p.source_ips) do %>
+                        <%=pcdata(ip)%><% if j < #p.source_ips then %>, <% end %>
+                    <% end %>
+                </td>
+            </tr>
+            <% end %>
+        </tbody>
+    </table>
+    <% else %>
+    <p><%:No proxies configured. Go to Proxy List tab to add proxies.%></p>
+    <% end %>
+</div>
+
+<div class="mp-status">
+    <h3><%:Policy Routing Rules%></h3>
+    <% if ip_rules ~= "" then %>
+    <div class="code-block"><%=pcdata(ip_rules)%></div>
+    <% else %>
+    <p><%:No policy routing rules active.%></p>
+    <% end %>
+</div>
+
+<script type="text/javascript">
+function restartService() {
+    var btn = event.target;
+    btn.disabled = true;
+    btn.value = '<%:Restarting...%>';
+
+    (new XHR()).post('<%=luci.dispatcher.build_url("admin/services/multi_proxy/api/restart")%>', null, function(x, data) {
+        setTimeout(function() {
+            window.location.reload();
+        }, 3000);
+    });
+}
+</script>

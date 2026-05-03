@@ -1,0 +1,13 @@
+{
+	"admin/services/multi_proxy": {
+		"title": "Multi-Proxy",
+		"order": 85,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-multi-proxy" ],
+			"uci": { "multi_proxy": true }
+		}
+	}
+}

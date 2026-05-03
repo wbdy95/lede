@@ -1,0 +1,777 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2024 OpenWrt.org
+# Multi-Proxy service script - Per-IP SOCKS5/HTTP proxy routing
+# Optimized with ipset for high performance (supports thousands of devices)
+
+START=99
+STOP=10
+
+# Extra commands for reload_proxies
+EXTRA_COMMANDS="reload_proxies status"
+EXTRA_HELP="	reload_proxies	Reload proxy configurations without restarting API
+	status		Show service status"
+
+NAME="multi_proxy"
+REDSOCKS_CONF_DIR="/var/run/multi_proxy"
+LOG_FILE="/var/log/multi_proxy.log"
+IPSET_PREFIX="mp_proxy_"
+
+# Global variables
+ENABLED="0"
+BASE_PORT="12300"
+RT_TABLE_BASE="100"
+FWMARK_BASE="100"
+PROXY_INDEX=0
+API_ENABLED="0"
+API_PORT="9088"
+API_BIND="0.0.0.0"
+API_PID_FILE="/var/run/multi_proxy_api.pid"
+
+# Connection and bandwidth limit variables
+CONNLIMIT_ENABLED="0"
+CONNLIMIT_MAX="100"
+BWLIMIT_ENABLED="0"
+BWLIMIT_DOWN="10240"
+BWLIMIT_UP="5120"
+
+log_msg() {
+    local level="$1"
+    shift
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$level] $*" >> "$LOG_FILE"
+    logger -t "$NAME" -p "daemon.$level" "$*"
+}
+
+# Clean up all iptables rules, ipsets and routing
+cleanup() {
+    log_msg "info" "Cleaning up iptables rules, ipsets and routing tables..."
+
+    # Remove iptables chains
+    iptables -t nat -D PREROUTING -j MULTI_PROXY_NAT 2>/dev/null
+    iptables -t nat -F MULTI_PROXY_NAT 2>/dev/null
+    iptables -t nat -X MULTI_PROXY_NAT 2>/dev/null
+
+    iptables -t mangle -D PREROUTING -j MULTI_PROXY_MARK 2>/dev/null
+    iptables -t mangle -F MULTI_PROXY_MARK 2>/dev/null
+    iptables -t mangle -X MULTI_PROXY_MARK 2>/dev/null
+
+    # Remove UDP blocking chain
+    iptables -D FORWARD -j MULTI_PROXY_UDP_BLOCK 2>/dev/null
+    iptables -F MULTI_PROXY_UDP_BLOCK 2>/dev/null
+    iptables -X MULTI_PROXY_UDP_BLOCK 2>/dev/null
+
+    # Remove connection limit chain
+    iptables -D FORWARD -j MULTI_PROXY_CONNLIMIT 2>/dev/null
+    iptables -F MULTI_PROXY_CONNLIMIT 2>/dev/null
+    iptables -X MULTI_PROXY_CONNLIMIT 2>/dev/null
+
+    # Remove bandwidth limit (tc qdisc)
+    cleanup_bandwidth_limit
+
+    # Remove ip rules and routes
+    local i=0
+    local fwmark_base="${FWMARK_BASE:-100}"
+    local rt_table_base="${RT_TABLE_BASE:-100}"
+
+    while [ $i -lt 50 ]; do
+        local fwmark=$((fwmark_base + i))
+        local rt_table=$((rt_table_base + i))
+        ip rule del fwmark "$fwmark" table "$rt_table" 2>/dev/null
+        ip route flush table "$rt_table" 2>/dev/null
+        i=$((i + 1))
+    done
+
+    # Destroy all ipsets created by us
+    for ipset_name in $(ipset list -n 2>/dev/null | grep "^${IPSET_PREFIX}"); do
+        ipset destroy "$ipset_name" 2>/dev/null
+        log_msg "info" "Destroyed ipset: $ipset_name"
+    done
+
+    # Kill all redsocks2 instances started by us
+    if [ -d "$REDSOCKS_CONF_DIR" ]; then
+        for pidfile in "$REDSOCKS_CONF_DIR"/*.pid; do
+            [ -f "$pidfile" ] && {
+                kill $(cat "$pidfile") 2>/dev/null
+                rm -f "$pidfile"
+            }
+        done
+    fi
+
+    pkill -f "redsocks2.*$REDSOCKS_CONF_DIR" 2>/dev/null
+
+    rm -rf "$REDSOCKS_CONF_DIR"
+
+    log_msg "info" "Cleanup completed"
+}
+
+# Get configuration values
+load_config() {
+    config_load multi_proxy
+    config_get ENABLED config enabled "0"
+    config_get BASE_PORT config base_port "12300"
+    config_get RT_TABLE_BASE config rt_table_base "100"
+    config_get FWMARK_BASE config fwmark_base "100"
+    config_get API_ENABLED config api_enabled "0"
+    config_get API_PORT config api_port "9088"
+    config_get API_BIND config api_bind "0.0.0.0"
+    # Connection and bandwidth limit settings
+    config_get CONNLIMIT_ENABLED config connlimit_enabled "0"
+    config_get CONNLIMIT_MAX config connlimit_max "100"
+    config_get BWLIMIT_ENABLED config bwlimit_enabled "0"
+    config_get BWLIMIT_DOWN config bwlimit_down "10240"
+    config_get BWLIMIT_UP config bwlimit_up "5120"
+}
+
+# Start API server
+start_api() {
+    if [ "$API_ENABLED" = "1" ]; then
+        log_msg "info" "Starting API server on $API_BIND:$API_PORT..."
+
+        # Stop existing API server
+        stop_api
+
+        # Start API server in background
+        /usr/sbin/multi_proxy_api &
+        local pid=$!
+        echo "$pid" > "$API_PID_FILE"
+
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            log_msg "info" "API server started (pid: $pid)"
+            echo "API server started on $API_BIND:$API_PORT"
+        else
+            log_msg "error" "Failed to start API server"
+            echo "Failed to start API server"
+        fi
+    else
+        log_msg "info" "API server is disabled"
+    fi
+}
+
+# Stop API server
+stop_api() {
+    if [ -f "$API_PID_FILE" ]; then
+        local pid=$(cat "$API_PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            log_msg "info" "Stopped API server (pid: $pid)"
+        fi
+        rm -f "$API_PID_FILE"
+    fi
+    # Also kill by process name (compatible with busybox)
+    killall multi_proxy_api 2>/dev/null
+    sleep 1
+}
+
+# Setup connection limit using iptables connlimit
+setup_connlimit() {
+    if [ "$CONNLIMIT_ENABLED" != "1" ]; then
+        log_msg "info" "Connection limit is disabled"
+        return 0
+    fi
+
+    # Test if connlimit module is working
+    if ! iptables -m connlimit --help >/dev/null 2>&1; then
+        log_msg "warn" "iptables connlimit module not available or incompatible"
+        echo "Warning: Connection limit disabled - connlimit module not working"
+        return 1
+    fi
+
+    log_msg "info" "Setting up connection limit: max $CONNLIMIT_MAX connections per IP"
+
+    # Create connection limit chain
+    iptables -N MULTI_PROXY_CONNLIMIT 2>/dev/null
+    iptables -I FORWARD -j MULTI_PROXY_CONNLIMIT
+
+    # Apply connlimit to all proxy ipsets
+    for ipset_name in $(ipset list -n 2>/dev/null | grep "^${IPSET_PREFIX}"); do
+        # Limit concurrent connections per source IP
+        iptables -A MULTI_PROXY_CONNLIMIT -m set --match-set "$ipset_name" src \
+            -m connlimit --connlimit-above "$CONNLIMIT_MAX" --connlimit-mask 32 \
+            -j DROP
+        log_msg "info" "Added connlimit rule for $ipset_name (max: $CONNLIMIT_MAX)"
+    done
+
+    log_msg "info" "Connection limit setup completed"
+}
+
+# Get LAN interface name
+get_lan_iface() {
+    # Try to get from network config
+    local iface=$(uci get network.lan.device 2>/dev/null || uci get network.lan.ifname 2>/dev/null)
+    if [ -z "$iface" ]; then
+        # Fallback: find br-lan or eth0
+        if [ -e /sys/class/net/br-lan ]; then
+            iface="br-lan"
+        elif [ -e /sys/class/net/eth0 ]; then
+            iface="eth0"
+        fi
+    fi
+    echo "$iface"
+}
+
+# Setup bandwidth limit using tc
+setup_bandwidth_limit() {
+    if [ "$BWLIMIT_ENABLED" != "1" ]; then
+        log_msg "info" "Bandwidth limit is disabled"
+        return 0
+    fi
+
+    # Check if tc command is available
+    if ! command -v tc >/dev/null 2>&1; then
+        log_msg "warn" "tc command not found, bandwidth limit requires tc-full or tc-tiny package"
+        echo "Warning: Bandwidth limit disabled - tc command not available"
+        return 1
+    fi
+
+    local lan_iface=$(get_lan_iface)
+    if [ -z "$lan_iface" ]; then
+        log_msg "error" "Cannot determine LAN interface for bandwidth limit"
+        return 1
+    fi
+
+    log_msg "info" "Setting up bandwidth limit on $lan_iface: down=${BWLIMIT_DOWN}kbps, up=${BWLIMIT_UP}kbps"
+
+    # Clean existing qdisc
+    tc qdisc del dev "$lan_iface" root 2>/dev/null
+    tc qdisc del dev "$lan_iface" ingress 2>/dev/null
+
+    # Setup egress (download from router to client) using HTB
+    tc qdisc add dev "$lan_iface" root handle 1: htb default 999
+    tc class add dev "$lan_iface" parent 1: classid 1:1 htb rate 1000mbit ceil 1000mbit
+
+    # Create default class for unlimited traffic
+    tc class add dev "$lan_iface" parent 1:1 classid 1:999 htb rate 1000mbit ceil 1000mbit
+
+    # Create bandwidth limited class for proxy users
+    local class_id=10
+    for ipset_name in $(ipset list -n 2>/dev/null | grep "^${IPSET_PREFIX}"); do
+        # Create class with bandwidth limit
+        tc class add dev "$lan_iface" parent 1:1 classid 1:$class_id htb \
+            rate "${BWLIMIT_DOWN}kbit" ceil "${BWLIMIT_DOWN}kbit"
+
+        # Add fair queueing to the class
+        tc qdisc add dev "$lan_iface" parent 1:$class_id handle $class_id: sfq perturb 10
+
+        # Use iptables to mark packets and tc filter to match
+        # Mark packets destined to proxy users
+        iptables -t mangle -A POSTROUTING -o "$lan_iface" \
+            -m set --match-set "$ipset_name" dst \
+            -j MARK --set-mark $((200 + class_id))
+
+        # Filter marked packets to the limited class
+        tc filter add dev "$lan_iface" parent 1: protocol ip prio 1 \
+            handle $((200 + class_id)) fw classid 1:$class_id
+
+        log_msg "info" "Added bandwidth limit for $ipset_name (class 1:$class_id, ${BWLIMIT_DOWN}kbps)"
+        class_id=$((class_id + 1))
+    done
+
+    # Setup ingress (upload from client to router) using IFB
+    # Check if ifb module is available
+    if modprobe ifb 2>/dev/null; then
+        ip link add ifb0 type ifb 2>/dev/null
+        ip link set ifb0 up 2>/dev/null
+
+        # Redirect ingress to ifb0
+        tc qdisc add dev "$lan_iface" ingress 2>/dev/null
+        tc filter add dev "$lan_iface" parent ffff: protocol ip u32 \
+            match u32 0 0 action mirred egress redirect dev ifb0 2>/dev/null
+
+        # Setup HTB on ifb0
+        tc qdisc add dev ifb0 root handle 1: htb default 999
+        tc class add dev ifb0 parent 1: classid 1:1 htb rate 1000mbit ceil 1000mbit
+        tc class add dev ifb0 parent 1:1 classid 1:999 htb rate 1000mbit ceil 1000mbit
+
+        class_id=10
+        for ipset_name in $(ipset list -n 2>/dev/null | grep "^${IPSET_PREFIX}"); do
+            tc class add dev ifb0 parent 1:1 classid 1:$class_id htb \
+                rate "${BWLIMIT_UP}kbit" ceil "${BWLIMIT_UP}kbit"
+            tc qdisc add dev ifb0 parent 1:$class_id handle $class_id: sfq perturb 10
+
+            # Mark upload packets from proxy users
+            iptables -t mangle -A PREROUTING -i "$lan_iface" \
+                -m set --match-set "$ipset_name" src \
+                -j MARK --set-mark $((300 + class_id))
+
+            tc filter add dev ifb0 parent 1: protocol ip prio 1 \
+                handle $((300 + class_id)) fw classid 1:$class_id
+
+            log_msg "info" "Added upload limit for $ipset_name (${BWLIMIT_UP}kbps)"
+            class_id=$((class_id + 1))
+        done
+    else
+        log_msg "warn" "IFB module not available, upload limit not applied"
+    fi
+
+    log_msg "info" "Bandwidth limit setup completed"
+}
+
+# Cleanup bandwidth limit
+cleanup_bandwidth_limit() {
+    # Check if tc command is available
+    if ! command -v tc >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local lan_iface=$(get_lan_iface)
+    if [ -n "$lan_iface" ]; then
+        tc qdisc del dev "$lan_iface" root 2>/dev/null
+        tc qdisc del dev "$lan_iface" ingress 2>/dev/null
+    fi
+
+    # Clean IFB
+    tc qdisc del dev ifb0 root 2>/dev/null
+    ip link del ifb0 2>/dev/null
+
+    # Remove mangle marks for bandwidth limit
+    iptables -t mangle -F POSTROUTING 2>/dev/null
+
+    log_msg "info" "Bandwidth limit cleanup completed"
+}
+
+# Generate redsocks2 config for a proxy
+generate_redsocks_config() {
+    local section="$1"
+    local index="$2"
+
+    local enabled name type server port username password
+    config_get enabled "$section" enabled "0"
+    [ "$enabled" != "1" ] && return 1
+
+    config_get name "$section" name "$section"
+    config_get type "$section" type "socks5"
+    config_get server "$section" server ""
+    config_get port "$section" port ""
+    config_get username "$section" username ""
+    config_get password "$section" password ""
+
+    [ -z "$server" ] || [ -z "$port" ] && {
+        log_msg "warn" "Proxy $name: missing server or port"
+        return 1
+    }
+
+    local local_port=$((BASE_PORT + index))
+    local conf_file="$REDSOCKS_CONF_DIR/redsocks_${index}.conf"
+
+    # Determine redsocks2 type
+    local rs_type="socks5"
+    case "$type" in
+        socks5) rs_type="socks5" ;;
+        socks4) rs_type="socks4" ;;
+        http-connect) rs_type="http-connect" ;;
+        http-relay) rs_type="http-relay" ;;
+    esac
+
+    # Generate config file with bind/relay format (optimized for high concurrency)
+    {
+        echo 'base {'
+        echo '    log_debug = off;'
+        echo '    log_info = off;'
+        echo '    log = "syslog:daemon";'
+        echo '    daemon = on;'
+        echo '    redirector = iptables;'
+        echo '    reuseport = on;'
+        echo '}'
+        echo ''
+        echo 'redsocks {'
+        echo "    bind = \"127.0.0.1:${local_port}\";"
+        echo "    relay = \"${server}:${port}\";"
+        echo "    type = ${rs_type};"
+        echo '    autoproxy = 0;'
+        echo '    timeout = 30;'
+        if [ -n "$username" ] && [ -n "$password" ]; then
+            echo "    login = \"${username}\";"
+            echo "    password = \"${password}\";"
+        fi
+        echo '}'
+    } > "$conf_file"
+
+    log_msg "info" "Generated config for proxy $name (index $index, port $local_port, server $server:$port)"
+    cat "$conf_file" >> "$LOG_FILE"
+    return 0
+}
+
+# Setup iptables and routing for a proxy using ipset
+setup_routing() {
+    local section="$1"
+    local index="$2"
+
+    local enabled name server
+    config_get enabled "$section" enabled "0"
+    [ "$enabled" != "1" ] && return 1
+
+    config_get name "$section" name "$section"
+    config_get server "$section" server ""
+
+    local local_port=$((BASE_PORT + index))
+    local fwmark=$((FWMARK_BASE + index))
+    local rt_table=$((RT_TABLE_BASE + index))
+    local ipset_name="${IPSET_PREFIX}${index}"
+
+    # Get source IPs for this proxy
+    local source_ips=""
+    local ip_count=0
+
+    # Use callback to collect source IPs
+    append_ip() {
+        source_ips="$source_ips $1"
+        ip_count=$((ip_count + 1))
+    }
+    config_list_foreach "$section" source_ip append_ip
+
+    # Trim leading space
+    source_ips=$(echo "$source_ips" | sed 's/^ *//')
+
+    [ -z "$source_ips" ] && {
+        log_msg "warn" "Proxy $name: no source IPs configured"
+        return 1
+    }
+
+    log_msg "info" "Proxy $name: $ip_count source IPs configured"
+
+    # Get default gateway
+    local gateway=$(ip route | grep "^default" | awk '{print $3}' | head -1)
+    [ -z "$gateway" ] && {
+        log_msg "error" "Cannot determine default gateway"
+        return 1
+    }
+
+    # Create ipset for this proxy (hash:ip for O(1) lookup)
+    ipset create "$ipset_name" hash:ip hashsize 4096 maxelem 65536 2>/dev/null
+    if [ $? -ne 0 ]; then
+        log_msg "error" "Failed to create ipset $ipset_name"
+        return 1
+    fi
+
+    # Add all source IPs to ipset (batch add for performance)
+    for src_ip in $source_ips; do
+        ipset add "$ipset_name" "$src_ip" 2>/dev/null
+    done
+
+    log_msg "info" "Created ipset $ipset_name with $ip_count IPs"
+
+    # Setup routing table
+    ip route add default via "$gateway" table "$rt_table" 2>/dev/null
+    ip rule add fwmark "$fwmark" table "$rt_table" priority $((1000 + index)) 2>/dev/null
+
+    log_msg "info" "Created routing table $rt_table with fwmark $fwmark for proxy $name (gateway: $gateway)"
+
+    # Add iptables rules using ipset match (single rule per proxy, O(1) lookup)
+    # Mark traffic from IPs in this ipset
+    iptables -t mangle -A MULTI_PROXY_MARK -m set --match-set "$ipset_name" src -j MARK --set-mark "$fwmark"
+
+    # Block UDP traffic for IPs in this ipset
+    iptables -A MULTI_PROXY_UDP_BLOCK -m set --match-set "$ipset_name" src -p udp -j DROP
+
+    # NAT rules for this proxy (skip private destinations, then redirect)
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d 224.0.0.0/4 -j RETURN
+    # Skip traffic to the proxy server itself to prevent loops
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -d "$server" -j RETURN
+    # Redirect to redsocks
+    iptables -t nat -A MULTI_PROXY_NAT -m set --match-set "$ipset_name" src -p tcp -j DNAT --to-destination 127.0.0.1:"$local_port"
+
+    log_msg "info" "Added iptables rules for proxy $name using ipset $ipset_name (DNAT to 127.0.0.1:$local_port)"
+
+    return 0
+}
+
+# Start a redsocks2 instance
+start_redsocks_instance() {
+    local index="$1"
+    local conf_file="$REDSOCKS_CONF_DIR/redsocks_${index}.conf"
+    local pid_file="$REDSOCKS_CONF_DIR/redsocks_${index}.pid"
+
+    [ -f "$conf_file" ] || return 1
+
+    log_msg "info" "Starting redsocks2 with config: $conf_file"
+
+    # Increase file descriptor limit for high concurrency
+    ulimit -n 655350 2>/dev/null
+
+    # Start redsocks2
+    redsocks2 -c "$conf_file" -p "$pid_file" 2>&1 | while read line; do
+        log_msg "info" "redsocks2: $line"
+    done
+
+    sleep 1
+
+    if [ -f "$pid_file" ]; then
+        local pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            log_msg "info" "Started redsocks2 instance $index (pid: $pid)"
+            return 0
+        fi
+    fi
+
+    # Check if process is running by another method
+    if pgrep -f "redsocks2.*redsocks_${index}.conf" >/dev/null 2>&1; then
+        log_msg "info" "Started redsocks2 instance $index (found by pgrep)"
+        return 0
+    fi
+
+    log_msg "error" "Failed to start redsocks2 instance $index"
+    return 1
+}
+
+# Process a single proxy section
+process_proxy() {
+    local section="$1"
+
+    local enabled
+    config_get enabled "$section" enabled "0"
+    [ "$enabled" != "1" ] && return 0
+
+    log_msg "info" "Processing proxy section: $section (index: $PROXY_INDEX)"
+
+    if generate_redsocks_config "$section" "$PROXY_INDEX"; then
+        if setup_routing "$section" "$PROXY_INDEX"; then
+            if start_redsocks_instance "$PROXY_INDEX"; then
+                PROXY_INDEX=$((PROXY_INDEX + 1))
+                return 0
+            fi
+        fi
+    fi
+
+    log_msg "warn" "Failed to setup proxy $section"
+    return 1
+}
+
+start() {
+    load_config
+
+    if [ "$ENABLED" != "1" ]; then
+        log_msg "info" "Multi-proxy service is disabled"
+        echo "Multi-proxy service is disabled"
+        return 0
+    fi
+
+    log_msg "info" "Starting multi-proxy service..."
+    echo "Starting multi-proxy service..."
+
+    mkdir -p "$REDSOCKS_CONF_DIR"
+
+    cleanup
+
+    mkdir -p "$REDSOCKS_CONF_DIR"
+
+    # Enable route_localnet to allow DNAT to 127.0.0.1
+    for iface in /proc/sys/net/ipv4/conf/*/route_localnet; do
+        echo 1 > "$iface" 2>/dev/null
+    done
+    log_msg "info" "Enabled route_localnet for all interfaces"
+
+    # Optimize kernel parameters for high concurrency
+    echo 655350 > /proc/sys/fs/file-max 2>/dev/null
+    echo 655350 > /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null
+    echo 65535 > /proc/sys/net/core/somaxconn 2>/dev/null
+    echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null
+    echo 30 > /proc/sys/net/ipv4/tcp_fin_timeout 2>/dev/null
+    echo "1024 65535" > /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null
+    log_msg "info" "Optimized kernel parameters for high concurrency"
+
+    # Create iptables chains
+    iptables -t mangle -N MULTI_PROXY_MARK 2>/dev/null
+    iptables -t mangle -A PREROUTING -j MULTI_PROXY_MARK
+
+    iptables -t nat -N MULTI_PROXY_NAT 2>/dev/null
+    iptables -t nat -A PREROUTING -j MULTI_PROXY_NAT
+
+    # Create UDP blocking chain
+    iptables -N MULTI_PROXY_UDP_BLOCK 2>/dev/null
+    iptables -I FORWARD -j MULTI_PROXY_UDP_BLOCK
+
+    # Skip local addresses in mangle (these won't be marked)
+    iptables -t mangle -A MULTI_PROXY_MARK -d 10.0.0.0/8 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 172.16.0.0/12 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 192.168.0.0/16 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 127.0.0.0/8 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 224.0.0.0/4 -j RETURN
+
+    PROXY_INDEX=0
+
+    config_load multi_proxy
+    config_foreach process_proxy proxy
+
+    if [ $PROXY_INDEX -gt 0 ]; then
+        log_msg "info" "Multi-proxy service started with $PROXY_INDEX proxy(ies)"
+        echo "Multi-proxy service started with $PROXY_INDEX proxy(ies)"
+        touch "$REDSOCKS_CONF_DIR/running"
+
+        # Setup connection and bandwidth limits after proxies are configured
+        setup_connlimit
+        setup_bandwidth_limit
+    else
+        log_msg "warn" "No proxies configured or all proxies failed to start"
+        echo "Warning: No proxies configured or all proxies failed to start"
+        cleanup
+    fi
+
+    # Start API server
+    start_api
+}
+
+stop() {
+    log_msg "info" "Stopping multi-proxy service..."
+    echo "Stopping multi-proxy service..."
+
+    load_config
+    cleanup
+    stop_api
+
+    log_msg "info" "Multi-proxy service stopped"
+    echo "Multi-proxy service stopped"
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
+
+reload() {
+    restart
+}
+
+# Reload only proxies (redsocks2) without restarting API
+reload_proxies() {
+    log_msg "info" "Reloading proxy configurations..."
+
+    load_config
+
+    if [ "$ENABLED" != "1" ]; then
+        log_msg "info" "Multi-proxy service is disabled"
+        return 0
+    fi
+
+    # Stop redsocks2 instances and clean iptables, but keep API running
+    cleanup
+
+    mkdir -p "$REDSOCKS_CONF_DIR"
+
+    # Enable route_localnet
+    for iface in /proc/sys/net/ipv4/conf/*/route_localnet; do
+        echo 1 > "$iface" 2>/dev/null
+    done
+
+    # Optimize kernel parameters for high concurrency
+    echo 655350 > /proc/sys/fs/file-max 2>/dev/null
+    echo 655350 > /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null
+    echo 65535 > /proc/sys/net/core/somaxconn 2>/dev/null
+    echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null
+    echo 30 > /proc/sys/net/ipv4/tcp_fin_timeout 2>/dev/null
+    echo "1024 65535" > /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null
+
+    # Create iptables chains
+    iptables -t mangle -N MULTI_PROXY_MARK 2>/dev/null
+    iptables -t mangle -A PREROUTING -j MULTI_PROXY_MARK
+
+    iptables -t nat -N MULTI_PROXY_NAT 2>/dev/null
+    iptables -t nat -A PREROUTING -j MULTI_PROXY_NAT
+
+    # Create UDP blocking chain
+    iptables -N MULTI_PROXY_UDP_BLOCK 2>/dev/null
+    iptables -I FORWARD -j MULTI_PROXY_UDP_BLOCK
+
+    # Skip local addresses in mangle
+    iptables -t mangle -A MULTI_PROXY_MARK -d 10.0.0.0/8 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 172.16.0.0/12 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 192.168.0.0/16 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 127.0.0.0/8 -j RETURN
+    iptables -t mangle -A MULTI_PROXY_MARK -d 224.0.0.0/4 -j RETURN
+
+    PROXY_INDEX=0
+
+    config_load multi_proxy
+    config_foreach process_proxy proxy
+
+    if [ $PROXY_INDEX -gt 0 ]; then
+        log_msg "info" "Proxies reloaded: $PROXY_INDEX proxy(ies) active"
+        echo "Proxies reloaded: $PROXY_INDEX proxy(ies) active"
+        touch "$REDSOCKS_CONF_DIR/running"
+
+        # Setup connection and bandwidth limits after proxies are configured
+        setup_connlimit
+        setup_bandwidth_limit
+    else
+        log_msg "warn" "No proxies configured or all proxies failed"
+        echo "Warning: No proxies configured"
+    fi
+}
+
+status() {
+    load_config
+
+    echo "=== Multi-Proxy Status ==="
+    echo ""
+
+    if [ "$ENABLED" != "1" ]; then
+        echo "Service: DISABLED"
+        return
+    fi
+
+    echo "Service: ENABLED"
+
+    local running_instances=$(pgrep -c -f "redsocks2" 2>/dev/null || echo "0")
+    if [ "$running_instances" -gt 0 ]; then
+        echo "Status: RUNNING ($running_instances instance(s))"
+    else
+        echo "Status: STOPPED"
+    fi
+    echo ""
+
+    # API status
+    echo "--- API Server ---"
+    if [ "$API_ENABLED" = "1" ]; then
+        if pgrep -f "multi_proxy_api" >/dev/null 2>&1; then
+            echo "API: RUNNING on $API_BIND:$API_PORT"
+        else
+            echo "API: ENABLED but NOT RUNNING"
+        fi
+    else
+        echo "API: DISABLED"
+    fi
+    echo ""
+
+    echo "--- Running redsocks2 instances ---"
+    ps w 2>/dev/null | grep "redsocks2" | grep -v grep || echo "No instances running"
+    echo ""
+
+    echo "--- ipsets ---"
+    for ipset_name in $(ipset list -n 2>/dev/null | grep "^${IPSET_PREFIX}"); do
+        local count=$(ipset list "$ipset_name" 2>/dev/null | grep -c "^[0-9]" || echo "0")
+        echo "$ipset_name: $count IPs"
+    done
+    echo ""
+
+    echo "--- iptables mangle rules ---"
+    iptables -t mangle -L MULTI_PROXY_MARK -n -v 2>/dev/null || echo "Chain not found"
+    echo ""
+
+    echo "--- iptables nat rules ---"
+    iptables -t nat -L MULTI_PROXY_NAT -n -v 2>/dev/null || echo "Chain not found"
+    echo ""
+
+    echo "--- iptables UDP block rules ---"
+    iptables -L MULTI_PROXY_UDP_BLOCK -n -v 2>/dev/null || echo "Chain not found"
+    echo ""
+
+    echo "--- IP rules ---"
+    ip rule show 2>/dev/null | grep -E "fwmark.*lookup" || echo "No fwmark rules"
+    echo ""
+
+    echo "--- Routing tables ---"
+    local i=0
+    while [ $i -lt 10 ]; do
+        local rt_table=$((RT_TABLE_BASE + i))
+        local routes=$(ip route show table "$rt_table" 2>/dev/null)
+        if [ -n "$routes" ]; then
+            echo "Table $rt_table:"
+            echo "$routes"
+        fi
+        i=$((i + 1))
+    done
+}

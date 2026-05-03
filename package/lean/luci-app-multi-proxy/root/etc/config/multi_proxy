@@ -1,0 +1,32 @@
+config multi_proxy 'config'
+    option enabled '0'
+    option log_level '4'
+    # Base port for redsocks2 instances (each proxy uses base_port + index)
+    option base_port '12300'
+    # Routing table base number
+    option rt_table_base '100'
+    # fwmark base number
+    option fwmark_base '100'
+    # API settings
+    option api_enabled '0'
+    option api_port '9088'
+    option api_bind '0.0.0.0'
+    # Connection limit settings (per client IP)
+    option connlimit_enabled '0'
+    option connlimit_max '100'
+    # Bandwidth limit settings (per client IP, in kbps)
+    option bwlimit_enabled '0'
+    option bwlimit_down '10240'
+    option bwlimit_up '5120'
+
+# Example proxy definition
+# config proxy
+#     option name 'proxy1'
+#     option enabled '1'
+#     option type 'socks5'
+#     option server '192.168.1.100'
+#     option port '1080'
+#     option username ''
+#     option password ''
+#     list source_ip '192.168.1.10'
+#     list source_ip '192.168.1.11'

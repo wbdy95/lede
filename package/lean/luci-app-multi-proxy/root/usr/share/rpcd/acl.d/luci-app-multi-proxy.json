@@ -1,0 +1,11 @@
+{
+	"luci-app-multi-proxy": {
+		"description": "Grant UCI access for luci-app-multi-proxy",
+		"read": {
+			"uci": [ "multi_proxy" ]
+		},
+		"write": {
+			"uci": [ "multi_proxy" ]
+		}
+	}
+}

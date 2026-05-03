@@ -1,0 +1,20 @@
+#!/bin/sh
+# Copyright (C) 2024 OpenWrt.org
+# UCI defaults for luci-app-multi-proxy
+
+# Initialize configuration if not exists
+if [ ! -f /etc/config/multi_proxy ]; then
+    touch /etc/config/multi_proxy
+
+    uci -q batch <<-EOF
+        set multi_proxy.config=multi_proxy
+        set multi_proxy.config.enabled='0'
+        set multi_proxy.config.log_level='4'
+        set multi_proxy.config.base_port='12300'
+        set multi_proxy.config.rt_table_base='100'
+        set multi_proxy.config.fwmark_base='100'
+        commit multi_proxy
+EOF
+fi
+
+exit 0
