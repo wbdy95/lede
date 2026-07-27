@@ -1,0 +1,11 @@
+#!/bin/sh
+# PicoClaw public mode launcher script
+
+CONFIG_FILE="/etc/picoclaw/config.yml"
+
+# Ensure config exists
+[ -f "$CONFIG_FILE" ] || /usr/bin/picoclaw-generate-config
+
+# Start picoclaw-launcher in public mode
+# This will start the web UI on http://localhost:18800
+exec /usr/bin/picoclaw-launcher -config "$CONFIG_FILE" -public "$@"

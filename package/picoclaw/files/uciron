@@ -1,0 +1,20 @@
+config picoclaw 'general'
+	option enabled '0'
+	option port '8080'
+	option provider 'openai'
+	option model 'gpt-4o-mini'
+
+config api 'keys'
+	option openai ''
+	option anthropic ''
+	option gemini ''
+
+config memory 'settings'
+	option type 'jsonl'
+	option max_entries '1000'
+	option path '/etc/picoclaw/memory.jsonl'
+
+config security 'security'
+	option allowed_lan '1'
+	option max_tokens '4096'
+	option timeout '30'
